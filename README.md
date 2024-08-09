@@ -25,6 +25,7 @@ or have been reported by others as working.
 | Transmission | qBittorrent | libtorrent | OS    | Issue    |
 | :----------: | :---------: | :--------: | :---: | :------: |
 | 4.0.6        | 4.6.2       | 2.0.9      | Linux | N/A      |
+| 4.0.6        | 4.6.5       | 1.2.19.0   | Linux | N/A      |
 
 # Running
 

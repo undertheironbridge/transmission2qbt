@@ -27,8 +27,8 @@ def transmission_get_speed_limit(resume_data, key):
     speed_limit_obj = resume_data[key]
     if speed_limit_obj[b"use-speed-limit"] != 0:
         return speed_limit_obj[b"speed-Bps"]
-    else:
-        return -1
+
+    return -1
 
 
 def transmission_get_file_prorities(resume_data):
@@ -40,14 +40,14 @@ def transmission_get_file_prorities(resume_data):
             f"priority and dnd lengths are not equal : {len(priority)} != {len(dnd)}"
         )
 
-    for i in range(0, len(priority)):
-        if dnd[i] == 1:
+    for idx, prio in list(enumerate(priority)):
+        if dnd[idx] == 1:
             rv.append(0)  # libtorrent::dont_download
-        elif priority[i] == -1:  # TR_PRI_LOW
+        elif prio == -1:  # TR_PRI_LOW
             rv.append(1)  # libtorrent::low_priority
-        elif priority[i] == 0:  # TR_PRI_NORMAL
+        elif prio == 0:  # TR_PRI_NORMAL
             rv.append(4)  # libtorrent::default_priority
-        elif priority[i] == 1:  # TR_PRI_HIGH
+        elif prio == 1:  # TR_PRI_HIGH
             rv.append(7)  # libtorrent::top_priority
 
     return rv
@@ -70,20 +70,20 @@ def transmission_get_peers(resume_data, addr_size, key):
     return bytes(rv)
 
 
-def transmission_get_limit(tr_resume, type):
-    limit_key = f"{type}-limit".encode()
-    mode_key = f"{type}-mode".encode()
+def transmission_get_limit(tr_resume, limit_kind):
+    limit_key = f"{limit_kind}-limit".encode()
+    mode_key = f"{limit_kind}-mode".encode()
 
     limit_obj = tr_resume[limit_key]
     limit_mode = limit_obj[mode_key]
     if limit_mode == 0:  # TR_*LIMIT_GLOBAL
         return "-2"  # BitTorrent::Torrent::USE_GLOBAL_*
-    elif limit_mode == 1:  # TR_*LIMIT_SINGLE
+    if limit_mode == 1:  # TR_*LIMIT_SINGLE
         return limit_obj[limit_key]
-    elif limit_mode == 2:  # TR_*LIMIT_UNLIMITED
+    if limit_mode == 2:  # TR_*LIMIT_UNLIMITED
         return "-1"  # BitTorrent::Torrent::NO_*_LIMIT
-    else:
-        raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
+
+    raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
 
 
 def map_resume_to_qbt(resume_data, info_hash):

@@ -2,12 +2,14 @@
 
 import sys
 import os
-import bencodepy
 import argparse
 import logging
 import re
 import shutil
 import binascii
+
+
+import bencodepy
 
 
 class ConversionError(RuntimeError):
@@ -149,12 +151,42 @@ def copy_to_target(source_torrent_abs_path, qbt_bt_backup_dir, info_hash, resume
         rm_f(qbt_torrent_path)
 
 
-def do_scan(transmission_config_dir, qbt_bt_backup_dir):
+def copy_if_wanted(
+    source_torrent_abs_path, qbt_bt_backup_dir, info_hash, resume_data, predicate
+):
+    if predicate is None:
+        copy_to_target(
+            source_torrent_abs_path, qbt_bt_backup_dir, info_hash, resume_data
+        )
+        return
+
+    predicate_rv = None
+    with open(source_torrent_abs_path, "rb") as tor:
+        parsed_tor = bencodepy.bdecode(tor.read())
+        try:
+            predicate_rv = eval(predicate)
+        except Exception as e:
+            logging.info(
+                f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
+            )
+            return
+
+    if predicate_rv is True:
+        copy_to_target(
+            source_torrent_abs_path, qbt_bt_backup_dir, info_hash, resume_data
+        )
+    else:
+        logging.info(
+            f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
+        )
+
+
+def do_scan(transmission_config_dir, qbt_bt_backup_dir, predicate):
     transmission_resume_dir = os.path.join(transmission_config_dir, "resume")
     transmission_torrents_dir = os.path.join(transmission_config_dir, "torrents")
     torrent_file_rgx = re.compile("([0-9a-f]{40})\\.torrent")
 
-    for root, dirs, files in os.walk(transmission_torrents_dir):
+    for _, _, files in os.walk(transmission_torrents_dir):
         for torf in files:
             match = torrent_file_rgx.fullmatch(torf)
             if match:
@@ -165,11 +197,12 @@ def do_scan(transmission_config_dir, qbt_bt_backup_dir):
                         "rb",
                     ) as resumf:
                         resume_data = bencodepy.bdecode(resumf.read())
-                        copy_to_target(
+                        copy_if_wanted(
                             os.path.join(transmission_torrents_dir, torf),
                             qbt_bt_backup_dir,
                             info_hash,
                             resume_data,
+                            predicate,
                         )
 
                 except ConversionError as e:
@@ -207,8 +240,13 @@ def main():
         action="store",
         help="The BT_backup directory inside target qBittorrent instance's data directory",
     )
+    parser.add_argument(
+        "--predicate",
+        action="store",
+        help="A Python expression for filtering source torrents",
+    )
     args = parser.parse_args()
-    do_scan(args.transmission_config_dir, args.qbt_bt_backup_dir)
+    do_scan(args.transmission_config_dir, args.qbt_bt_backup_dir, args.predicate)
 
     return 0
 

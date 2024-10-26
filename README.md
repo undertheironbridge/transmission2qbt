@@ -36,6 +36,22 @@ Please shut down both Transmission and qBittorrent before running this.
 ./transmission2qbt.py ~/.config/transmission ~/.local/share/data/qBittorrent/BT_backup
 ```
 
+## Predicate
+
+The `--predicate` argument accepts a Python expression that can be used for
+filtering torrents which are going to be imported to qBt. The parsed torrent
+file is named `parsed_tor` and its associated Transmission resume data is
+`resume_data`. If the expression returns anything other than `True` or throws
+an exception, the torrent is skipped.
+
+For example, this will only cause torrents using Debian's tracker whose name
+includes `amd64` to be imported :
+
+```
+parsed_tor[b'announce'] == b'http://bttracker.debian.org:6969/announce'
+and b'amd64' in parsed_tor[b'info'][b'name']
+```
+
 # Mappings
 
 * Transmission's "labels" become qBittorrent's "tags".
@@ -69,6 +85,9 @@ Generally, you should look for `BT_backup` in :
   `$HOME/.local/share/${qbt_profile_name}` (non-legacy) on Linux,
 * `C:/Users/$USER/AppData/Local/qBittorrent/${qbt_config_name}` on Windows,
 * `$HOME/Library/Application Support/qBittorrent/${qbt_config_name}` on macOS.
+
+If you use a profile directory specified via the `--profile` commandline option,
+then the location you want is `${profile_dir}/qBittorrent/data/BT_backup`.
 
 # Limitations
 

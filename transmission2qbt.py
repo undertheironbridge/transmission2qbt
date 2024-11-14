@@ -125,7 +125,7 @@ def map_resume_to_qbt(resume_data, info_hash):
     }
 
     if resume_data.get(b"incomplete-dir", b"") != b"":
-        qbt_resume_data = resume_data[b"incomplete-dir"]
+        qbt_resume_data[b"qBt-downloadPath"] = resume_data[b"incomplete-dir"]
 
     if resume_data[b"paused"] == 1:
         qbt_resume_data[b"auto_managed"] = 0

@@ -28,6 +28,7 @@ or have been reported by others as working.
 | 4.0.6        | 4.6.5       | 1.2.19.0   | Linux | N/A      |
 | 4.0.5        | 4.6.5       | 1.2.19.0   | Linux | N/A      |
 | 4.0.6        | 5.0.1       | 1.2.19.0   | Linux | https://github.com/undertheironbridge/transmission2qbt/issues/1 |
+| 2.94         | 5.0.1       | 2.0.11     | Linux | N/A      |
 
 # Running
 
@@ -105,12 +106,6 @@ append `.!qBt` itself if that option is enabled. This command will remove the
 ```
 find . -name '*.part' -exec /bin/bash -c 'for i in "$@"; do mv "$i" "${i%.part}"; done;' -- '{}' +
 ```
-
-* This tool assumes that you're running Transmission 4.0+ which, at the time of
-writing, stores resume data and torrents as files named after the torrent's
-infohash in `resume` and `torrents` subdirectories in its configuration
-directory. This has changed over the years so the script most probably won't
-work for pre-4.0 versions out of the box.
 
 * This tool assumes that you're _not_ using the - currently experimental - DB
 storage for resume data in qBittorrent.

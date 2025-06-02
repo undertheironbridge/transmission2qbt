@@ -33,7 +33,25 @@ or have been reported by others as working.
 
 # Running
 
-Please shut down both Transmission and qBittorrent before running this.
+## Prerequisites
+
+First of all, make sure your qBittorrent profile is not set to use the
+(currently experimental) SQLite database for storing resume information, as
+running this script in this case will not work.
+
+This can be checked by going to `Tools > Preferences > Advanced` - the value
+for the *Resume data storage type (requires restart)* setting should be
+*Fastresume files*. If you change it, restart qBittorrent before running this
+script so qBittorrent can export any existing data from SQLite and switches to
+Fastresume before starting the migration from Transmission.
+
+Having `torrents.db` *somewhere* in your qBittorrent profile directory also
+means that this profile is configured to use SQLite, and needs to be changed to
+use Fastresume first.
+
+## Invocation
+
+Shut down both Transmission and qBittorrent and do :
 
 ```
 ./transmission2qbt.py ~/.config/transmission ~/.local/share/data/qBittorrent/BT_backup
@@ -107,9 +125,6 @@ append `.!qBt` itself if that option is enabled. This command will remove the
 ```
 find . -name '*.part' -exec /bin/bash -c 'for i in "$@"; do mv "$i" "${i%.part}"; done;' -- '{}' +
 ```
-
-* This tool assumes that you're _not_ using the - currently experimental - DB
-storage for resume data in qBittorrent.
 
 * Transmission saves the binary form of one of its internal data structures,
 whose layout is dependent on the CPU and compiler being used, straight to the

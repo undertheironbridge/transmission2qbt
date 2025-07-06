@@ -37,17 +37,14 @@ or have been reported by others as working.
 
 First of all, make sure your qBittorrent profile is not set to use the
 (currently experimental) SQLite database for storing resume information, as
-running this script in this case will not work.
+running this script in this case will not work. The script will quit if it
+thinks your qBittorrent instance has this enabled.
 
 This can be checked by going to `Tools > Preferences > Advanced` - the value
 for the *Resume data storage type (requires restart)* setting should be
 *Fastresume files*. If you change it, restart qBittorrent before running this
 script so qBittorrent can export any existing data from SQLite and switches to
 Fastresume before starting the migration from Transmission.
-
-Having `torrents.db` *somewhere* in your qBittorrent profile directory also
-means that this profile is configured to use SQLite, and needs to be changed to
-use Fastresume first.
 
 ## Invocation
 

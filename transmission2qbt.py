@@ -28,6 +28,16 @@ class ReadBencodedError(RuntimeError):
     pass
 
 
+class QbtUsesSqliteForResumeError(RuntimeError):
+    pass
+
+
+def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir):
+    torrents_db_path = os.path.join(qbt_bt_backup_dir, "..", "torrents.db")
+    if os.path.exists(torrents_db_path):
+        raise QbtUsesSqliteForResumeError()
+
+
 def read_bencoded(path):
     with open(path, "rb") as f:
         try:
@@ -160,6 +170,7 @@ def map_resume_to_qbt(resume_data, info_hash):
 
 class TransmissionQbtImporter:
     def __init__(self, args):
+        check_for_qbt_sqlite_resume_db(args.qbt_bt_backup_dir)
         self.source_torrents_dir = os.path.join(
             args.transmission_config_dir, "torrents"
         )
@@ -287,9 +298,19 @@ def main():
         action="store",
         help="A Python expression for filtering source torrents",
     )
+
     args = parser.parse_args()
-    importer = TransmissionQbtImporter(args)
-    importer.scan()
+    try:
+        TransmissionQbtImporter(args).scan()
+    except QbtUsesSqliteForResumeError:
+        logging.error(
+            """It looks like your qBittorrent instance uses the experimental SQLite-based
+implementation for resume data storage. This is not supported. If you want to
+use this script, go to Tools > Preferences > Advanced and change "Resume data
+storage type" to "Fastresume files". Then, restart qBittorrent, close it, and
+try running this script again."""
+        )
+        return 1
 
     return 0
 

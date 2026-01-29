@@ -63,6 +63,11 @@ def transmission_get_speed_limit(resume_data, key):
 def transmission_get_file_prorities(resume_data):
     priority = resume_data.get(b"priority")
     dnd = resume_data.get(b"dnd")
+
+    # Return empty list if priority data is not available
+    if priority is None or dnd is None:
+        return []
+
     rv = []
     if len(priority) != len(dnd):
         raise ConversionError(

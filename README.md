@@ -124,7 +124,9 @@ append `.!qBt` itself if that option is enabled. This command will remove the
 find . -name '*.part' -exec /bin/bash -c 'for i in "$@"; do mv "$i" "${i%.part}"; done;' -- '{}' +
 ```
 
-* Transmission saves the binary form of one of its internal data structures,
-whose layout is dependent on the CPU and compiler being used, straight to the
-resume file. The current implementation was based on a Transmission compiled
-with gcc 13.2 on a x86_64 CPU running Linux.
+* Transmission versions earlier than 4.1.0
+(precisely https://github.com/transmission/transmission/commit/1054ba4ab6a40af597e936586ac69a5f27390229)
+save the binary form of one of their internal data structures, whose layout is
+dependent on the CPU and compiler being used, straight to the resume file. The
+current implementation was based on a Transmission compiled with gcc 13.2 on a
+x86_64 CPU running Linux.

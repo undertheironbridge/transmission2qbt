@@ -30,6 +30,7 @@ or have been reported by others as working.
 | 4.0.6        | 5.0.1       | 1.2.19.0   | Linux | https://github.com/undertheironbridge/transmission2qbt/issues/1 |
 | 2.94         | 5.0.1       | 2.0.11     | Linux | N/A      |
 | 2.94         | 5.1.0       | 2.0.11     | Linux | N/A      |
+| 4.1.0        | 5.1.4       | 2.0.12     | Linux | https://github.com/undertheironbridge/transmission2qbt/issues/7 |
 
 # Running
 

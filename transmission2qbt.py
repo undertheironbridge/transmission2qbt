@@ -87,11 +87,7 @@ def transmission_get_file_prorities(resume_data):
     return rv
 
 
-def transmission_get_peers(resume_data, addr_size, key):
-    src = resume_data.get(key)
-    if src is None:
-        return b""
-
+def peers_convert_from_raw_bytes(src, addr_size):
     rv = bytearray()
     i = 0
     while i < len(src):
@@ -102,6 +98,25 @@ def transmission_get_peers(resume_data, addr_size, key):
         i += 2
         i += 2  # flags
     return bytes(rv)
+
+
+def peers_convert_from_bencoded(src):
+    # used since Transmission commit 1054ba4 (earliest release - 4.1.0)
+    rv = bytearray()
+    for d in src:
+        rv += d[b"socket_address"]
+    return bytes(rv)
+
+
+def transmission_get_peers(resume_data, addr_size, key):
+    src = resume_data.get(key)
+    if src is None:
+        return b""
+
+    if isinstance(src, list):
+        return peers_convert_from_bencoded(src)
+    else:
+        return peers_convert_from_raw_bytes(src, addr_size)
 
 
 def transmission_get_limit(tr_resume, limit_kind):

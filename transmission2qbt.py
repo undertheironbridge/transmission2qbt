@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+from dataclasses import dataclass
+from typing import Literal, cast, overload
 import sys
 import os
 import argparse
@@ -17,7 +19,7 @@ class ConversionError(RuntimeError):
     pass
 
 
-def rm_f(path):
+def rm_f(path: str):
     try:
         os.remove(path)
     except (FileNotFoundError, OSError):
@@ -32,62 +34,167 @@ class QbtUsesSqliteForResumeError(RuntimeError):
     pass
 
 
-def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir):
+type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class BencodeData:
+    path: str
+    data: dict[bytes, BencodeType]
+
+    def _get[T](
+        self, key: bytes, type: type[T], optional: bool, default: T | None
+    ) -> T | None:
+        result = self.data.get(key)
+        if result is None:
+            if optional:
+                return default
+            raise ConversionError(f"{self.path}.{key.decode()} missing")
+
+        if not isinstance(result, type):
+            raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
+        return cast(T, result)
+
+    @overload
+    def get_bytes(self, key: bytes, *, optional: Literal[False] = False) -> bytes: ...
+    @overload
+    def get_bytes(self, key: bytes, *, optional: Literal[True]) -> bytes | None: ...
+    @overload
+    def get_bytes(self, key: bytes, *, default: bytes) -> bytes: ...
+    def get_bytes(
+        self, key: bytes, *, optional: bool = False, default: bytes | None = None
+    ) -> bytes | None:
+        return self._get(key, bytes, optional, default)
+
+    @overload
+    def get_int(self, key: bytes, *, optional: Literal[False] = False) -> int: ...
+    @overload
+    def get_int(self, key: bytes, *, optional: Literal[True]) -> int | None: ...
+    @overload
+    def get_int(self, key: bytes, *, default: int) -> int: ...
+    def get_int(
+        self, key: bytes, *, optional: bool = False, default: int | None = None
+    ) -> int | None:
+        return self._get(key, int, optional, default)
+
+    @overload
+    def get_list(
+        self, key: bytes, *, optional: Literal[False] = False
+    ) -> list[BencodeType]: ...
+    @overload
+    def get_list(
+        self, key: bytes, *, optional: Literal[True]
+    ) -> list[BencodeType] | None: ...
+    def get_list(
+        self, key: bytes, *, optional: bool = False
+    ) -> list[BencodeType] | None:
+        result = self.data.get(key)
+        if result is None:
+            if optional:
+                return None
+            raise ConversionError(f"{self.path}.{key.decode()} missing")
+
+        if not isinstance(result, list):
+            raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
+
+        return result
+
+    @overload
+    def get_dict(
+        self, key: bytes, *, optional: Literal[False] = False
+    ) -> "BencodeData": ...
+    @overload
+    def get_dict(
+        self, key: bytes, *, optional: Literal[True]
+    ) -> "BencodeData | None": ...
+    def get_dict(self, key: bytes, *, optional: bool = False) -> "BencodeData | None":
+        result = self.data.get(key)
+        if result is None:
+            if optional:
+                return None
+            raise ConversionError(f"{self.path}.{key.decode()} missing")
+
+        if not isinstance(result, dict):
+            raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
+
+        return BencodeData(f"{self.path}.{key.decode()}", result)
+
+
+def bencode(data: BencodeType):
+    return bencodepy.bencode(data)  # type: ignore
+
+
+def bdecode(data: bytes) -> BencodeType:
+    return bencodepy.bdecode(data)  # type: ignore
+
+
+def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str):
     torrents_db_path = os.path.join(qbt_bt_backup_dir, "..", "torrents.db")
     if os.path.exists(torrents_db_path):
         raise QbtUsesSqliteForResumeError()
 
 
-def read_bencoded(path):
+def get_data(root: str, path: str):
     with open(path, "rb") as f:
         try:
-            return bencodepy.bdecode(f.read())
+            decoded = bdecode(f.read())
         except (ValueError, bencodepy.BencodeDecodeError) as e:
             raise ReadBencodedError(path) from e
+    if not isinstance(decoded, dict):
+        raise ConversionError(f"{root} is not a dict")
+    return BencodeData(root, decoded)
 
 
 # FIXME BEP0003 says that clients must not perform a decode-encode
 # roundtrip on invalid data. this is exactly what this does.
-def calc_info_hash(parsed_tor):
-    return hashlib.sha1(bencodepy.bencode(parsed_tor[b"info"]))
+def calc_info_hash(parsed_tor: BencodeData):
+    info = parsed_tor.get_dict(b"info")
+    return hashlib.sha1(bencode(info.data))
 
 
-def transmission_get_speed_limit(resume_data, key):
-    speed_limit_obj = resume_data[key]
-    if speed_limit_obj[b"use-speed-limit"] != 0:
-        return speed_limit_obj[b"speed-Bps"]
+def transmission_get_speed_limit(resume_data: BencodeData, key: bytes):
+    speed_limit_obj = resume_data.get_dict(key)
+    if speed_limit_obj.get_int(b"use-speed-limit") != 0:
+        return speed_limit_obj.get_int(b"speed-Bps")
 
     return -1
 
 
-def transmission_get_file_prorities(resume_data):
-    priority = resume_data.get(b"priority")
-    dnd = resume_data.get(b"dnd")
+def transmission_get_file_prorities(resume_data: BencodeData):
+    priority = resume_data.get_list(b"priority", optional=True)
+    dnd = resume_data.get_list(b"dnd", optional=True)
 
     # Return empty list if priority data is not available
     if priority is None or dnd is None:
-        return []
+        return
 
-    rv = []
     if len(priority) != len(dnd):
         raise ConversionError(
             f"priority and dnd lengths are not equal : {len(priority)} != {len(dnd)}"
         )
 
-    for idx, prio in list(enumerate(priority)):
-        if dnd[idx] == 1:
-            rv.append(0)  # libtorrent::dont_download
-        elif prio == -1:  # TR_PRI_LOW
-            rv.append(1)  # libtorrent::low_priority
-        elif prio == 0:  # TR_PRI_NORMAL
-            rv.append(4)  # libtorrent::default_priority
-        elif prio == 1:  # TR_PRI_HIGH
-            rv.append(7)  # libtorrent::top_priority
+    for i, (p, d) in enumerate(zip(priority, dnd, strict=True)):
+        if not isinstance(p, int):
+            raise ConversionError(f"priority[{i}] is not an int")
+        if not isinstance(d, int):
+            raise ConversionError(f"dnd[{i}] is not an int")
+        if d == 1:
+            yield 0  # libtorrent::dont_download
+        else:
+            match p:
+                case -1:  # TR_PRI_LOW
+                    yield 1  # libtorrent::low_priority
+                case 0:  # TR_PRI_NORMAL
+                    yield 4  # libtorrent::default_priority
+                case 1:  # TR_PRI_HIGH
+                    yield 7  # libtorrent::top_priority
+                case _:
+                    raise ConversionError(f"Unknown priority[{i}]: {p}")
 
-    return rv
 
-
-def peers_convert_from_raw_bytes(src, addr_size):
+def peers_convert_from_raw_bytes(src: bytes, addr_size: int):
     rv = bytearray()
     i = 0
     while i < len(src):
@@ -100,96 +207,120 @@ def peers_convert_from_raw_bytes(src, addr_size):
     return bytes(rv)
 
 
-def peers_convert_from_bencoded(src):
+def peers_convert_from_bencoded(src: list[BencodeType], key: bytes):
     # used since Transmission commit 1054ba4 (earliest release - 4.1.0)
     rv = bytearray()
-    for d in src:
-        rv += d[b"socket_address"]
+    for i, d in enumerate(src):
+        if not isinstance(d, dict):
+            raise ConversionError(f"{key}[{i}] is not a dict")
+        socket_address = d[b"socket_address"]
+        if not isinstance(socket_address, bytes):
+            raise ConversionError(f"{key}[{i}].socket_address is not a bytes")
+        rv += socket_address
     return bytes(rv)
 
 
-def transmission_get_peers(resume_data, addr_size, key):
-    src = resume_data.get(key)
+def transmission_get_peers(resume_data: BencodeData, addr_size: int, key: bytes):
+    src = resume_data.data.get(key)
     if src is None:
         return b""
 
     if isinstance(src, list):
-        return peers_convert_from_bencoded(src)
-    else:
+        return peers_convert_from_bencoded(src, key)
+
+    if isinstance(src, bytes):
         return peers_convert_from_raw_bytes(src, addr_size)
 
+    raise ConversionError(f"{key} is not a list or a bytes")
 
-def transmission_get_limit(tr_resume, limit_kind):
+
+def transmission_get_limit(tr_resume: BencodeData, limit_kind: str):
     limit_key = f"{limit_kind}-limit".encode()
     mode_key = f"{limit_kind}-mode".encode()
 
-    limit_obj = tr_resume[limit_key]
-    limit_mode = limit_obj[mode_key]
-    if limit_mode == 0:  # TR_*LIMIT_GLOBAL
-        return "-2"  # BitTorrent::Torrent::USE_GLOBAL_*
-    if limit_mode == 1:  # TR_*LIMIT_SINGLE
-        return limit_obj[limit_key]
-    if limit_mode == 2:  # TR_*LIMIT_UNLIMITED
-        return "-1"  # BitTorrent::Torrent::NO_*_LIMIT
+    limit_obj = tr_resume.get_dict(limit_key)
+    limit_mode = limit_obj.get_int(mode_key)
 
-    raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
+    match limit_mode:
+        case 0:  # TR_*LIMIT_GLOBAL
+            return -2  # BitTorrent::Torrent::USE_GLOBAL_*
+        case 1:  # TR_*LIMIT_SINGLE
+            return limit_obj.get_int(limit_key)
+        case 2:  # TR_*LIMIT_UNLIMITED
+            return -1  # BitTorrent::Torrent::NO_*_LIMIT
+        case _:
+            raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
 
 
-def map_resume_to_qbt(resume_data, info_hash):
-    qbt_resume_data = {
-        b"file-format": "libtorrent resume file",
+def map_resume_to_qbt(resume_data: BencodeData, info_hash: str):
+    downloading_time_seconds = resume_data.get_int(b"downloading-time-seconds")
+    seeding_time_seconds = resume_data.get_int(b"seeding-time-seconds")
+
+    qbt_resume_data: BencodeType = {
+        b"file-format": b"libtorrent resume file",
         b"file-version": 1,
         b"info-hash": binascii.unhexlify(info_hash),
-        b"name": resume_data[b"name"],
-        b"total_uploaded": resume_data[b"uploaded"],
-        b"total_downloaded": resume_data[b"downloaded"],
-        b"added_time": resume_data[b"added-date"],
-        b"completed_time": resume_data[b"done-date"],
-        b"active_time": resume_data[b"downloading-time-seconds"]
-        + resume_data[b"seeding-time-seconds"],
-        b"finished_time": resume_data[b"downloading-time-seconds"],
-        b"seeding_time": resume_data[b"seeding-time-seconds"],
-        b"max_connections": resume_data[b"max-peers"],
+        b"name": resume_data.get_bytes(b"name"),
+        b"total_uploaded": resume_data.get_int(b"uploaded"),
+        b"total_downloaded": resume_data.get_int(b"downloaded"),
+        b"added_time": resume_data.get_int(b"added-date"),
+        b"completed_time": resume_data.get_int(b"done-date"),
+        b"active_time": downloading_time_seconds + seeding_time_seconds,
+        b"finished_time": downloading_time_seconds,
+        b"seeding_time": seeding_time_seconds,
+        b"max_connections": resume_data.get_int(b"max-peers"),
         b"upload_rate_limit": transmission_get_speed_limit(
             resume_data, b"speed-limit-up"
         ),
         b"download_rate_limit": transmission_get_speed_limit(
             resume_data, b"speed-limit-down"
         ),
-        b"save_path": resume_data[b"destination"],
-        b"paused": resume_data[b"paused"],
-        b"sequential_download": resume_data.get(b"sequentialDownload", 0),
-        b"file_priority": transmission_get_file_prorities(resume_data),
+        b"save_path": resume_data.get_bytes(b"destination"),
+        b"paused": resume_data.get_int(b"paused"),
+        b"sequential_download": resume_data.get_int(b"sequentialDownload", default=0),
+        b"file_priority": list(transmission_get_file_prorities(resume_data)),
         b"peers": transmission_get_peers(resume_data, 4, b"peers2"),
         b"peers6": transmission_get_peers(resume_data, 16, b"peers2-6"),
-        b"qBt-name": resume_data[b"name"],
+        b"qBt-name": resume_data.get_bytes(b"name"),
         b"qBt-ratioLimit": transmission_get_limit(resume_data, "ratio"),
         b"qBt-inactiveSeedingTimeLimit": int(
             transmission_get_limit(resume_data, "idle")
         ),
-        b"qBt-savePath": resume_data[b"destination"],
+        b"qBt-savePath": resume_data.get_bytes(b"destination"),
     }
 
-    if b"group" in resume_data:
-        qbt_resume_data[b"qBt-category"] = resume_data[b"group"]
+    group = resume_data.get_bytes(b"group", optional=True)
+    if group is not None:
+        qbt_resume_data[b"qBt-category"] = group
 
-    if b"labels" in resume_data:
-        qbt_resume_data[b"qBt-tags"] = (resume_data[b"labels"],)
+    labels = resume_data.get_list(b"labels", optional=True)
+    if labels is not None:
+        qbt_resume_data[b"qBt-tags"] = labels
 
-    if b"files" in resume_data:
-        qbt_resume_data[b"mapped_files"] = resume_data[b"files"]
+    files = resume_data.get_list(b"files", optional=True)
+    if files is not None:
+        qbt_resume_data[b"mapped_files"] = files
 
-    if b"incomplete-dir" in resume_data:
-        qbt_resume_data[b"qBt-downloadPath"] = resume_data[b"incomplete-dir"]
+    incomplete_dir = resume_data.get_bytes(b"incomplete_dir", optional=True)
+    if incomplete_dir is not None:
+        qbt_resume_data[b"qBt-downloadPath"] = incomplete_dir
 
-    if resume_data[b"paused"] == 1:
+    paused = resume_data.get_int(b"paused")
+    if paused == 1:
         qbt_resume_data[b"auto_managed"] = 0
 
     return qbt_resume_data
 
 
+@dataclass(frozen=True)
+class Args:
+    qbt_bt_backup_dir: str
+    transmission_config_dir: str
+    predicate: str | None
+
+
 class TransmissionQbtImporter:
-    def __init__(self, args):
+    def __init__(self, args: Args):
         check_for_qbt_sqlite_resume_db(args.qbt_bt_backup_dir)
         self.source_torrents_dir = os.path.join(
             args.transmission_config_dir, "torrents"
@@ -200,13 +331,15 @@ class TransmissionQbtImporter:
         self.torrent_file_300_rgx = re.compile("([0-9a-f]{40})\\.torrent")
         self.torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
 
-    def copy_to_target(self, source_tor_abs_path, info_hash, resume_data):
+    def copy_to_target(
+        self, source_tor_abs_path: str, info_hash: str, resume_data: BencodeData
+    ):
         qbt_resume_data = map_resume_to_qbt(resume_data, info_hash)
         qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
         try:
             with open(qbt_resume_path, "wb") as resumf:
-                resumf.write(bencodepy.bencode(qbt_resume_data))
+                resumf.write(bencode(qbt_resume_data))
             shutil.copy(source_tor_abs_path, qbt_torrent_path)
             logging.info(
                 f"Successfully imported {os.path.basename(source_tor_abs_path)} ({info_hash})"
@@ -214,19 +347,27 @@ class TransmissionQbtImporter:
 
         except:
             logging.warning(
-                f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {qbt_bt_backup_dir}"
+                f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {self.target_dir}"
             )
             rm_f(qbt_resume_path)
             rm_f(qbt_torrent_path)
 
-    def copy_if_wanted(self, source_tor_abs_path, parsed_tor, info_hash, resume_data):
+    def copy_if_wanted(
+        self,
+        source_tor_abs_path: str,
+        parsed_tor: BencodeData | None,
+        info_hash: str,
+        resume_data: BencodeData,
+    ):
         if self.predicate is None:
             self.copy_to_target(source_tor_abs_path, info_hash, resume_data)
             return
 
         predicate_rv = None
         parsed_tor = (
-            read_bencoded(source_tor_abs_path) if parsed_tor is None else parsed_tor
+            get_data("torrent", source_tor_abs_path)
+            if parsed_tor is None
+            else parsed_tor
         )
         try:
             predicate_rv = eval(self.predicate)
@@ -243,12 +384,12 @@ class TransmissionQbtImporter:
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
             )
 
-    def import_one(self, torf):
+    def import_one(self, torf: str):
         match = self.torrent_file_300_rgx.fullmatch(torf)
         if match:
             info_hash = match[1]
-            resume_data = read_bencoded(
-                os.path.join(self.source_resume_dir, info_hash + ".resume")
+            resume_data = get_data(
+                "resume", os.path.join(self.source_resume_dir, info_hash + ".resume")
             )
             self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
@@ -260,13 +401,14 @@ class TransmissionQbtImporter:
 
         match = self.torrent_file_294_rgx.search(torf)
         if match:
-            resume_data = read_bencoded(
+            resume_data = get_data(
+                "resume",
                 os.path.join(
                     self.source_resume_dir, os.path.splitext(torf)[0] + ".resume"
-                )
+                ),
             )
             source_tor_abs_path = os.path.join(self.source_torrents_dir, torf)
-            parsed_tor = read_bencoded(source_tor_abs_path)
+            parsed_tor = get_data("torrent", source_tor_abs_path)
             info_hash = calc_info_hash(parsed_tor).hexdigest()
             self.copy_if_wanted(
                 source_tor_abs_path,
@@ -319,7 +461,7 @@ def main():
         help="A Python expression for filtering source torrents",
     )
 
-    args = parser.parse_args()
+    args = cast(Args, parser.parse_args())
     try:
         TransmissionQbtImporter(args).scan()
     except QbtUsesSqliteForResumeError:

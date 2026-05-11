@@ -36,8 +36,6 @@ class QbtUsesSqliteForResumeError(RuntimeError):
 
 type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
 
-from dataclasses import dataclass
-
 
 @dataclass(frozen=True)
 class BencodeData:
@@ -49,7 +47,7 @@ class BencodeData:
     ) -> T | None:
         result = self.data.get(key)
         if result is None:
-            if optional:
+            if optional or default is not None:
                 return default
             raise ConversionError(f"{self.path}.{key.decode()} missing")
 
@@ -252,15 +250,33 @@ def transmission_get_limit(tr_resume: BencodeData, limit_kind: str):
             raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
 
 
-def map_resume_to_qbt(resume_data: BencodeData, info_hash: str):
+BIT_LOOKUP = [bytes(n >> i & 1 for i in range(7, -1, -1)) for n in range(256)]
+
+
+def transmission_get_pieces(tr_resume: BencodeData, num_pieces: int):
+    tr_piece_bytes = tr_resume.get_dict(b"progress").get_bytes(b"pieces")
+    match tr_piece_bytes:
+        case b"all":
+            return b"\1" * num_pieces
+        case b"none":
+            return b"\0" * num_pieces
+        case _:
+            qb_pieces = bytearray()
+            for tr_piece_byte in tr_piece_bytes:
+                qb_pieces += BIT_LOOKUP[tr_piece_byte]
+            return bytes(qb_pieces[:num_pieces].ljust(num_pieces, b"\0"))
+
+
+def map_resume_to_qbt(resume_data: BencodeData, info_hash: str, num_pieces: int):
     downloading_time_seconds = resume_data.get_int(b"downloading-time-seconds")
     seeding_time_seconds = resume_data.get_int(b"seeding-time-seconds")
+    name = resume_data.get_bytes(b"name")
 
     qbt_resume_data: BencodeType = {
         b"file-format": b"libtorrent resume file",
         b"file-version": 1,
         b"info-hash": binascii.unhexlify(info_hash),
-        b"name": resume_data.get_bytes(b"name"),
+        b"name": name,
         b"total_uploaded": resume_data.get_int(b"uploaded"),
         b"total_downloaded": resume_data.get_int(b"downloaded"),
         b"added_time": resume_data.get_int(b"added-date"),
@@ -281,7 +297,7 @@ def map_resume_to_qbt(resume_data: BencodeData, info_hash: str):
         b"file_priority": list(transmission_get_file_prorities(resume_data)),
         b"peers": transmission_get_peers(resume_data, 4, b"peers2"),
         b"peers6": transmission_get_peers(resume_data, 16, b"peers2-6"),
-        b"qBt-name": resume_data.get_bytes(b"name"),
+        b"qBt-name": name,
         b"qBt-ratioLimit": transmission_get_limit(resume_data, "ratio"),
         b"qBt-inactiveSeedingTimeLimit": int(
             transmission_get_limit(resume_data, "idle")
@@ -309,6 +325,8 @@ def map_resume_to_qbt(resume_data: BencodeData, info_hash: str):
     if paused == 1:
         qbt_resume_data[b"auto_managed"] = 0
 
+    qbt_resume_data[b"pieces"] = transmission_get_pieces(resume_data, num_pieces)
+
     return qbt_resume_data
 
 
@@ -332,9 +350,13 @@ class TransmissionQbtImporter:
         self.torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
 
     def copy_to_target(
-        self, source_tor_abs_path: str, info_hash: str, resume_data: BencodeData
+        self,
+        source_tor_abs_path: str,
+        info_hash: str,
+        num_pieces: int,
+        resume_data: BencodeData,
     ):
-        qbt_resume_data = map_resume_to_qbt(resume_data, info_hash)
+        qbt_resume_data = map_resume_to_qbt(resume_data, info_hash, num_pieces)
         qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
         try:
@@ -355,30 +377,31 @@ class TransmissionQbtImporter:
     def copy_if_wanted(
         self,
         source_tor_abs_path: str,
-        parsed_tor: BencodeData | None,
-        info_hash: str,
-        resume_data: BencodeData,
+        source_res_abs_path: str,
+        info_hash: str | None,
     ):
-        if self.predicate is None:
-            self.copy_to_target(source_tor_abs_path, info_hash, resume_data)
-            return
+        parsed_tor = get_data("torrent", source_tor_abs_path)
 
-        predicate_rv = None
-        parsed_tor = (
-            get_data("torrent", source_tor_abs_path)
-            if parsed_tor is None
-            else parsed_tor
-        )
-        try:
-            predicate_rv = eval(self.predicate)
-        except Exception as e:
-            logging.info(
-                f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
-            )
-            return
+        resume_data = get_data("resume", source_res_abs_path)
+
+        if info_hash is None:
+            info_hash = calc_info_hash(parsed_tor).hexdigest()
+
+        num_pieces = len(parsed_tor.get_dict(b"info").get_list(b"pieces")) // 20
+
+        if self.predicate is None:
+            predicate_rv = True
+        else:
+            try:
+                predicate_rv = eval(self.predicate)
+            except Exception as e:
+                logging.info(
+                    f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
+                )
+                return
 
         if predicate_rv is True:
-            self.copy_to_target(source_tor_abs_path, info_hash, resume_data)
+            self.copy_to_target(source_tor_abs_path, info_hash, num_pieces, resume_data)
         else:
             logging.info(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
@@ -388,33 +411,21 @@ class TransmissionQbtImporter:
         match = self.torrent_file_300_rgx.fullmatch(torf)
         if match:
             info_hash = match[1]
-            resume_data = get_data(
-                "resume", os.path.join(self.source_resume_dir, info_hash + ".resume")
-            )
             self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
-                None,
-                info_hash,
-                resume_data,
+                os.path.join(self.source_resume_dir, info_hash + ".resume"),
+                match[1],
             )
             return
 
         match = self.torrent_file_294_rgx.search(torf)
         if match:
-            resume_data = get_data(
-                "resume",
+            self.copy_if_wanted(
+                os.path.join(self.source_torrents_dir, torf),
                 os.path.join(
                     self.source_resume_dir, os.path.splitext(torf)[0] + ".resume"
                 ),
-            )
-            source_tor_abs_path = os.path.join(self.source_torrents_dir, torf)
-            parsed_tor = get_data("torrent", source_tor_abs_path)
-            info_hash = calc_info_hash(parsed_tor).hexdigest()
-            self.copy_if_wanted(
-                source_tor_abs_path,
-                parsed_tor,
-                info_hash,
-                resume_data,
+                None,
             )
             return
 

@@ -50,12 +50,9 @@ class BencodeListWrapper[T: bytes | int](Iterator[T]):
 
     def unwrap(self) -> BencodeList:
         return self._data
-    
+
     def __getitem__(self, key: int) -> T:
-        item = self._data[key]
-        if not isinstance(item, self._item_type):
-            raise ConversionError(f"{self._path}[{key}] is not {T}")
-        return item
+        return self._safecast(self._data[key], key)
 
     def __len__(self) -> int:
         return len(self._data)
@@ -71,6 +68,9 @@ class BencodeListWrapper[T: bytes | int](Iterator[T]):
         except StopIteration:
             raise StopIteration
 
+        return self._safecast(item, self._index)
+
+    def _safecast(self, item: BencodeType, index: int) -> T:
         if not isinstance(item, self._item_type):
             raise ConversionError(f"{self._path}[{self._index}] is not {T}")
         return item

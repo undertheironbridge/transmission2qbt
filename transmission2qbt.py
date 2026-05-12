@@ -95,7 +95,7 @@ class BencodeData:
             raise ConversionError(f"{self.path}.{key.decode()} missing")
 
         if not isinstance(result, list):
-            raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
+            raise ConversionError(f"{self.path}.{key.decode()} is not list")
 
         return result
 
@@ -115,7 +115,7 @@ class BencodeData:
             raise ConversionError(f"{self.path}.{key.decode()} missing")
 
         if not isinstance(result, dict):
-            raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
+            raise ConversionError(f"{self.path}.{key.decode()} is not dict")
 
         return BencodeData(f"{self.path}.{key.decode()}", result)
 
@@ -250,24 +250,99 @@ def transmission_get_limit(tr_resume: BencodeData, limit_kind: str):
             raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
 
 
-BIT_LOOKUP = [bytes(n >> i & 1 for i in range(7, -1, -1)) for n in range(256)]
+BLOCK_SIZE = 1 << 14  # 16KiB, standard across torrents
 
 
-def transmission_get_pieces(tr_resume: BencodeData, num_pieces: int):
-    tr_piece_bytes = tr_resume.get_dict(b"progress").get_bytes(b"pieces")
-    match tr_piece_bytes:
-        case b"all":
-            return b"\1" * num_pieces
-        case b"none":
-            return b"\0" * num_pieces
-        case _:
-            qb_pieces = bytearray()
-            for tr_piece_byte in tr_piece_bytes:
-                qb_pieces += BIT_LOOKUP[tr_piece_byte]
-            return bytes(qb_pieces[:num_pieces].ljust(num_pieces, b"\0"))
+def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int):
+    # We use masks to determine if torrent pieces are on disk, by extracting progress info
+    # from the Transmission resume for the pieces and comparing them to the mask.
+    # This method creates the mask for the last piece of the torrent, which is not as trivial
+    # as for the other pieces (where the mask is just 1s)
+    # This method is used by transmission_get_pieces
+
+    # Size of the last piece
+    # Note that in the special case where the torrent size is a multiple of the piece size,
+    # the last piece has the same size as all the other pieces
+    last_piece_size = torrent_size % piece_size or piece_size
+
+    # Number of blocks in the last piece
+    blocks_in_last_piece = -(-last_piece_size // BLOCK_SIZE)  # Ceiling integer division
+
+    # Get the start of the mask, made of 1s in groups of 8
+    mask_full_bytes = blocks_in_last_piece // 8
+    piece_mask = b"\xff" * mask_full_bytes
+
+    # Append last byte of the mask: 1s followed by 0s
+    mask_extra_bits = blocks_in_last_piece % 8
+    if mask_extra_bits:
+        # Create a byte made of n 1s followed by (8-n) 0s
+        piece_mask += bytes([0xFF << 8 - mask_extra_bits & 0xFF])
+
+    return piece_mask
 
 
-def map_resume_to_qbt(resume_data: BencodeData, info_hash: str, num_pieces: int):
+def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
+    info = parsed_tor.get_dict(b"info")
+    torrent_size = info.get_int(b"length")
+    piece_size = info.get_int(b"piece length")
+
+    # Sanity check the piece length
+    if piece_size & -piece_size != piece_size:  # This is only true for powers of 2
+        raise ConversionError(f"Piece size {piece_size} is not a power of 2")
+    # The progress.blocks bytes in the Transmission resume contain 1 bit per data block (where bit=1 means the block is on disk)
+    # So each byte in progress.blocks represents 8 blocks
+    # The pieces bytes in the qBittorrent resume contains a full byte per piece, where 0x01 means the piece is on disk
+    # The algorithm in this method determines if a piece is complete by extracting progress.blocks bytes in groups of n
+    # (where n=piece_size//BLOCK_SIZE//8), and checking that they are all 0xff
+    # For this to work without having to do bitwise operations, the piece size must be at least 8x the block size
+    # The block size is 16KiB so the minimum piece size is 128KiB
+    if piece_size < 1 << 17:  # 128KiB
+        raise ConversionError(f"Piece size {piece_size} is lower than 128KiB, aborting")
+
+    blocks = tr_resume.get_dict(b"progress").get_bytes(b"blocks")
+
+    # Sanity check the block bytes length
+    expected_num_blocks = -(
+        -torrent_size // BLOCK_SIZE // 8
+    )  # ceiling integer division
+    if len(blocks) != expected_num_blocks:
+        raise ConversionError(
+            f"resume block length was expected to be {expected_num_blocks} but was {len(blocks)}"
+        )
+
+    num_pieces = -(-torrent_size // piece_size)  # ceiling integer division
+
+    # Initialise the return object with 0s
+    qbit_pieces = bytearray(num_pieces)
+
+    blocks_per_piece = piece_size // BLOCK_SIZE
+    block_bytes_per_piece = blocks_per_piece // 8
+
+    # What a full piece looks like in progress.blocks
+    full_piece_mask = b"\xff" * block_bytes_per_piece
+
+    # Go through progress.blocks, grouping them into pieces
+    # We skip the last piece because it is a special case, see below
+    for piece_index in range(num_pieces):
+        piece_start = piece_index * block_bytes_per_piece
+        piece_blocks = blocks[piece_start : piece_start + block_bytes_per_piece]
+
+        # The last piece is special: if it is not exactly 128KiB then progress.blocks does not end with 0xff even when complete
+        # So we need to calculate the expected mask, then compare it to the last byte(s) of the blocks object
+        if piece_index == num_pieces - 1:
+            full_piece_mask = get_last_piece_mask_for_block_checking(
+                torrent_size, piece_size
+            )
+
+        if piece_blocks == full_piece_mask:
+            qbit_pieces[piece_index] = 1
+
+    return bytes(qbit_pieces)
+
+
+def map_resume_to_qbt(
+    info_hash: str, parsed_tor: BencodeData, resume_data: BencodeData
+):
     downloading_time_seconds = resume_data.get_int(b"downloading-time-seconds")
     seeding_time_seconds = resume_data.get_int(b"seeding-time-seconds")
     name = resume_data.get_bytes(b"name")
@@ -303,6 +378,7 @@ def map_resume_to_qbt(resume_data: BencodeData, info_hash: str, num_pieces: int)
             transmission_get_limit(resume_data, "idle")
         ),
         b"qBt-savePath": resume_data.get_bytes(b"destination"),
+        b"pieces": transmission_get_pieces(parsed_tor, resume_data),
     }
 
     group = resume_data.get_bytes(b"group", optional=True)
@@ -324,8 +400,6 @@ def map_resume_to_qbt(resume_data: BencodeData, info_hash: str, num_pieces: int)
     paused = resume_data.get_int(b"paused")
     if paused == 1:
         qbt_resume_data[b"auto_managed"] = 0
-
-    qbt_resume_data[b"pieces"] = transmission_get_pieces(resume_data, num_pieces)
 
     return qbt_resume_data
 
@@ -353,10 +427,10 @@ class TransmissionQbtImporter:
         self,
         source_tor_abs_path: str,
         info_hash: str,
-        num_pieces: int,
+        parsed_tor: BencodeData,
         resume_data: BencodeData,
     ):
-        qbt_resume_data = map_resume_to_qbt(resume_data, info_hash, num_pieces)
+        qbt_resume_data = map_resume_to_qbt(info_hash, parsed_tor, resume_data)
         qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
         try:
@@ -387,8 +461,6 @@ class TransmissionQbtImporter:
         if info_hash is None:
             info_hash = calc_info_hash(parsed_tor).hexdigest()
 
-        num_pieces = len(parsed_tor.get_dict(b"info").get_list(b"pieces")) // 20
-
         if self.predicate is None:
             predicate_rv = True
         else:
@@ -401,7 +473,7 @@ class TransmissionQbtImporter:
                 return
 
         if predicate_rv is True:
-            self.copy_to_target(source_tor_abs_path, info_hash, num_pieces, resume_data)
+            self.copy_to_target(source_tor_abs_path, info_hash, parsed_tor, resume_data)
         else:
             logging.info(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"

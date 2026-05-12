@@ -36,7 +36,7 @@ class QbtUsesSqliteForResumeError(RuntimeError):
 
 type BencodeList = list["BencodeType"]
 type BencodeDict = dict[bytes, "BencodeType"]
-type BencodeType = bytes | int | BencodeList | dict[bytes, BencodeType]
+type BencodeType = bytes | int | BencodeList | BencodeDict
 
 
 @dataclass(frozen=True)

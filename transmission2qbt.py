@@ -288,6 +288,7 @@ def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
     piece_size = info.get_int(b"piece length")
 
     # Sanity check the piece length
+    # Only accept piece size in powers of 2
     if piece_size & -piece_size != piece_size:  # This is only true for powers of 2
         raise ConversionError(f"Piece size {piece_size} is not a power of 2")
     # The progress.blocks bytes in the Transmission resume contain 1 bit per data block (where bit=1 means the block is on disk)
@@ -323,7 +324,6 @@ def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
     full_piece_mask = b"\xff" * block_bytes_per_piece
 
     # Go through progress.blocks, grouping them into pieces
-    # We skip the last piece because it is a special case, see below
     for piece_index in range(num_pieces):
         piece_start = piece_index * block_bytes_per_piece
         piece_blocks = blocks[piece_start : piece_start + block_bytes_per_piece]

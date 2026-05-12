@@ -44,8 +44,21 @@ class BencodeData:
     path: str
     data: BencodeDict
 
-    def _get[T](
-        self, key: bytes, type: type[T], optional: bool, default: T | None
+    @overload
+    def get[T: bytes | int](self, type: type[T], key: bytes) -> T: ...
+    @overload
+    def get[T: bytes | int](
+        self, type: type[T], key: bytes, *, optional: Literal[True]
+    ) -> T | None: ...
+    @overload
+    def get[T: bytes | int](self, type: type[T], key: bytes, *, default: T) -> T: ...
+    def get[T: bytes | int](
+        self,
+        type: type[T],
+        key: bytes,
+        *,
+        optional: bool = False,
+        default: T | None = None,
     ) -> T | None:
         result = self.data.get(key)
         if result is None:
@@ -55,29 +68,8 @@ class BencodeData:
 
         if not isinstance(result, type):
             raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
-        return cast(T, result)
 
-    @overload
-    def get_bytes(self, key: bytes) -> bytes: ...
-    @overload
-    def get_bytes(self, key: bytes, *, optional: Literal[True]) -> bytes | None: ...
-    @overload
-    def get_bytes(self, key: bytes, *, default: bytes) -> bytes: ...
-    def get_bytes(
-        self, key: bytes, *, optional: bool = False, default: bytes | None = None
-    ) -> bytes | None:
-        return self._get(key, bytes, optional, default)
-
-    @overload
-    def get_int(self, key: bytes) -> int: ...
-    @overload
-    def get_int(self, key: bytes, *, optional: Literal[True]) -> int | None: ...
-    @overload
-    def get_int(self, key: bytes, *, default: int) -> int: ...
-    def get_int(
-        self, key: bytes, *, optional: bool = False, default: int | None = None
-    ) -> int | None:
-        return self._get(key, int, optional, default)
+        return result
 
     @overload
     def get_list(self, key: bytes) -> BencodeList: ...
@@ -150,8 +142,8 @@ def calc_info_hash(parsed_tor: BencodeData):
 
 def transmission_get_speed_limit(resume_data: BencodeData, key: bytes):
     speed_limit_obj = resume_data.get_dict(key)
-    if speed_limit_obj.get_int(b"use-speed-limit") != 0:
-        return speed_limit_obj.get_int(b"speed-Bps")
+    if speed_limit_obj.get(int, b"use-speed-limit") != 0:
+        return speed_limit_obj.get(int, b"speed-Bps")
 
     return -1
 
@@ -233,13 +225,13 @@ def transmission_get_limit(tr_resume: BencodeData, limit_kind: str):
     mode_key = f"{limit_kind}-mode".encode()
 
     limit_obj = tr_resume.get_dict(limit_key)
-    limit_mode = limit_obj.get_int(mode_key)
+    limit_mode = limit_obj.get(int, mode_key)
 
     match limit_mode:
         case 0:  # TR_*LIMIT_GLOBAL
             return -2  # BitTorrent::Torrent::USE_GLOBAL_*
         case 1:  # TR_*LIMIT_SINGLE
-            return limit_obj.get_int(limit_key)
+            return limit_obj.get(int, limit_key)
         case 2:  # TR_*LIMIT_UNLIMITED
             return -1  # BitTorrent::Torrent::NO_*_LIMIT
         case _:
@@ -280,8 +272,8 @@ def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int):
 
 def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
     info = parsed_tor.get_dict(b"info")
-    torrent_size = info.get_int(b"length")
-    piece_size = info.get_int(b"piece length")
+    torrent_size = info.get(int, b"length")
+    piece_size = info.get(int, b"piece length")
 
     # Sanity check the piece length
     # Only accept piece size in powers of 2
@@ -297,7 +289,7 @@ def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
     if piece_size < 1 << 17:  # 128KiB
         raise ConversionError(f"Piece size {piece_size} is lower than 128KiB, aborting")
 
-    blocks = tr_resume.get_dict(b"progress").get_bytes(b"blocks")
+    blocks = tr_resume.get_dict(b"progress").get(bytes, b"blocks")
 
     # Sanity check the block bytes length
     # ceiling integer division
@@ -340,32 +332,32 @@ def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
 def map_resume_to_qbt(
     info_hash: str, parsed_tor: BencodeData, resume_data: BencodeData
 ):
-    downloading_time_seconds = resume_data.get_int(b"downloading-time-seconds")
-    seeding_time_seconds = resume_data.get_int(b"seeding-time-seconds")
-    name = resume_data.get_bytes(b"name")
+    downloading_time_seconds = resume_data.get(int, b"downloading-time-seconds")
+    seeding_time_seconds = resume_data.get(int, b"seeding-time-seconds")
+    name = resume_data.get(bytes, b"name")
 
     qbt_resume_data: BencodeType = {
         b"file-format": b"libtorrent resume file",
         b"file-version": 1,
         b"info-hash": binascii.unhexlify(info_hash),
         b"name": name,
-        b"total_uploaded": resume_data.get_int(b"uploaded"),
-        b"total_downloaded": resume_data.get_int(b"downloaded"),
-        b"added_time": resume_data.get_int(b"added-date"),
-        b"completed_time": resume_data.get_int(b"done-date"),
+        b"total_uploaded": resume_data.get(int, b"uploaded"),
+        b"total_downloaded": resume_data.get(int, b"downloaded"),
+        b"added_time": resume_data.get(int, b"added-date"),
+        b"completed_time": resume_data.get(int, b"done-date"),
         b"active_time": downloading_time_seconds + seeding_time_seconds,
         b"finished_time": downloading_time_seconds,
         b"seeding_time": seeding_time_seconds,
-        b"max_connections": resume_data.get_int(b"max-peers"),
+        b"max_connections": resume_data.get(int, b"max-peers"),
         b"upload_rate_limit": transmission_get_speed_limit(
             resume_data, b"speed-limit-up"
         ),
         b"download_rate_limit": transmission_get_speed_limit(
             resume_data, b"speed-limit-down"
         ),
-        b"save_path": resume_data.get_bytes(b"destination"),
-        b"paused": resume_data.get_int(b"paused"),
-        b"sequential_download": resume_data.get_int(b"sequentialDownload", default=0),
+        b"save_path": resume_data.get(bytes, b"destination"),
+        b"paused": resume_data.get(int, b"paused"),
+        b"sequential_download": resume_data.get(int, b"sequentialDownload", default=0),
         b"file_priority": list(transmission_get_file_prorities(resume_data)),
         b"peers": transmission_get_peers(resume_data, 4, b"peers2"),
         b"peers6": transmission_get_peers(resume_data, 16, b"peers2-6"),
@@ -374,11 +366,11 @@ def map_resume_to_qbt(
         b"qBt-inactiveSeedingTimeLimit": int(
             transmission_get_limit(resume_data, "idle")
         ),
-        b"qBt-savePath": resume_data.get_bytes(b"destination"),
+        b"qBt-savePath": resume_data.get(bytes, b"destination"),
         b"pieces": transmission_get_pieces(parsed_tor, resume_data),
     }
 
-    group = resume_data.get_bytes(b"group", optional=True)
+    group = resume_data.get(bytes, b"group", optional=True)
     if group is not None:
         qbt_resume_data[b"qBt-category"] = group
 
@@ -390,11 +382,11 @@ def map_resume_to_qbt(
     if files is not None:
         qbt_resume_data[b"mapped_files"] = files
 
-    incomplete_dir = resume_data.get_bytes(b"incomplete_dir", optional=True)
+    incomplete_dir = resume_data.get(bytes, b"incomplete_dir", optional=True)
     if incomplete_dir is not None:
         qbt_resume_data[b"qBt-downloadPath"] = incomplete_dir
 
-    paused = resume_data.get_int(b"paused")
+    paused = resume_data.get(int, b"paused")
     if paused == 1:
         qbt_resume_data[b"auto_managed"] = 0
 

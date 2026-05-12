@@ -34,13 +34,15 @@ class QbtUsesSqliteForResumeError(RuntimeError):
     pass
 
 
-type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
+type BencodeList = list["BencodeType"]
+type BencodeDict = dict[bytes, "BencodeType"]
+type BencodeType = bytes | int | BencodeList | dict[bytes, BencodeType]
 
 
 @dataclass(frozen=True)
 class BencodeData:
     path: str
-    data: dict[bytes, BencodeType]
+    data: BencodeDict
 
     def _get[T](
         self, key: bytes, type: type[T], optional: bool, default: T | None
@@ -80,14 +82,12 @@ class BencodeData:
     @overload
     def get_list(
         self, key: bytes, *, optional: Literal[False] = False
-    ) -> list[BencodeType]: ...
+    ) -> BencodeList: ...
     @overload
     def get_list(
         self, key: bytes, *, optional: Literal[True]
-    ) -> list[BencodeType] | None: ...
-    def get_list(
-        self, key: bytes, *, optional: bool = False
-    ) -> list[BencodeType] | None:
+    ) -> BencodeList | None: ...
+    def get_list(self, key: bytes, *, optional: bool = False) -> BencodeList | None:
         result = self.data.get(key)
         if result is None:
             if optional:
@@ -205,7 +205,7 @@ def peers_convert_from_raw_bytes(src: bytes, addr_size: int):
     return bytes(rv)
 
 
-def peers_convert_from_bencoded(src: list[BencodeType], key: bytes):
+def peers_convert_from_bencoded(src: BencodeList, key: bytes):
     # used since Transmission commit 1054ba4 (earliest release - 4.1.0)
     rv = bytearray()
     for i, d in enumerate(src):

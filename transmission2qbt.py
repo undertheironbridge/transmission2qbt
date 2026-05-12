@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Literal, cast, overload
+from collections.abc import Generator, Iterator
 import sys
 import os
 import argparse
@@ -19,7 +20,7 @@ class ConversionError(RuntimeError):
     pass
 
 
-def rm_f(path: str):
+def rm_f(path: str) -> None:
     try:
         os.remove(path)
     except (FileNotFoundError, OSError):
@@ -39,10 +40,43 @@ type BencodeDict = dict[bytes, "BencodeType"]
 type BencodeType = bytes | int | BencodeList | BencodeDict
 
 
-@dataclass(frozen=True)
-class BencodeData:
-    path: str
-    data: BencodeDict
+class BencodeListWrapper[T: bytes | int](Iterator[T]):
+    def __init__(self, item_type: type[T], path: str, data: BencodeList) -> None:
+        self._item_type = item_type
+        self._path = path
+        self._data = data
+        self._iter = iter(self._data)
+        self._index = -1
+
+    def unwrap(self) -> BencodeList:
+        return self._data
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __iter__(self) -> Iterator[T]:
+        return self
+
+    def __next__(self) -> T:
+        self._index += 1
+
+        try:
+            next_item = next(self._iter)
+        except StopIteration:
+            raise StopIteration
+
+        if not isinstance(next_item, self._item_type):
+            raise ConversionError(f"{self._path}[{self._index}] is not bytes")
+        return next_item
+
+
+class BencodeDictWrapper:
+    def __init__(self, path: str, data: BencodeDict) -> None:
+        self._path: str
+        self._data: BencodeDict
+
+    def unwrap(self) -> BencodeDict:
+        return self._data
 
     @overload
     def get[T: bytes | int](self, type: type[T], key: bytes) -> T: ...
@@ -60,55 +94,61 @@ class BencodeData:
         optional: bool = False,
         default: T | None = None,
     ) -> T | None:
-        result = self.data.get(key)
+        result = self._data.get(key)
         if result is None:
             if optional or default is not None:
                 return default
-            raise ConversionError(f"{self.path}.{key.decode()} missing")
+            raise ConversionError(f"{self._path}.{key.decode()} missing")
 
         if not isinstance(result, type):
-            raise ConversionError(f"{self.path}.{key.decode()} is not {type}")
+            raise ConversionError(f"{self._path}.{key.decode()} is not {type}")
 
         return result
 
     @overload
-    def get_list(self, key: bytes) -> BencodeList: ...
+    def get_list[T: bytes | int](
+        self, item_type: type[T], key: bytes
+    ) -> BencodeListWrapper[T]: ...
     @overload
-    def get_list(
-        self, key: bytes, *, optional: Literal[True]
-    ) -> BencodeList | None: ...
-    def get_list(self, key: bytes, *, optional: bool = False) -> BencodeList | None:
-        result = self.data.get(key)
-        if result is None:
+    def get_list[T: bytes | int](
+        self, item_type: type[T], key: bytes, *, optional: Literal[True]
+    ) -> BencodeListWrapper[T] | None: ...
+    def get_list[T: bytes | int](
+        self, item_type: type[T], key: bytes, *, optional: bool = False
+    ) -> BencodeListWrapper[T] | None:
+        data = self._data.get(key)
+        if data is None:
             if optional:
                 return None
-            raise ConversionError(f"{self.path}.{key.decode()} missing")
+            raise ConversionError(f"{self._path}.{key.decode()} is missing")
 
-        if not isinstance(result, list):
-            raise ConversionError(f"{self.path}.{key.decode()} is not list")
+        if not isinstance(data, list):
+            raise ConversionError(f"{self._path}.{key.decode()} is not a list")
 
-        return result
+        return BencodeListWrapper(item_type, f"{self._path}.{key.decode()}", data)
 
     @overload
-    def get_dict(self, key: bytes) -> "BencodeData": ...
+    def get_dict(self, key: bytes) -> "BencodeDictWrapper": ...
     @overload
     def get_dict(
         self, key: bytes, *, optional: Literal[True]
-    ) -> "BencodeData | None": ...
-    def get_dict(self, key: bytes, *, optional: bool = False) -> "BencodeData | None":
-        result = self.data.get(key)
+    ) -> "BencodeDictWrapper | None": ...
+    def get_dict(
+        self, key: bytes, *, optional: bool = False
+    ) -> "BencodeDictWrapper | None":
+        result = self._data.get(key)
         if result is None:
             if optional:
                 return None
-            raise ConversionError(f"{self.path}.{key.decode()} missing")
+            raise ConversionError(f"{self._path}.{key.decode()} missing")
 
         if not isinstance(result, dict):
-            raise ConversionError(f"{self.path}.{key.decode()} is not dict")
+            raise ConversionError(f"{self._path}.{key.decode()} is not a dict")
 
-        return BencodeData(f"{self.path}.{key.decode()}", result)
+        return BencodeDictWrapper(f"{self._path}.{key.decode()}", result)
 
 
-def bencode(data: BencodeType):
+def bencode(data: BencodeType) -> bytes:
     return bencodepy.bencode(data)  # type: ignore
 
 
@@ -116,13 +156,13 @@ def bdecode(data: bytes) -> BencodeType:
     return bencodepy.bdecode(data)  # type: ignore
 
 
-def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str):
+def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str) -> None:
     torrents_db_path = os.path.join(qbt_bt_backup_dir, "..", "torrents.db")
     if os.path.exists(torrents_db_path):
         raise QbtUsesSqliteForResumeError()
 
 
-def get_data(root: str, path: str):
+def get_data(root: str, path: str) -> BencodeDictWrapper:
     with open(path, "rb") as f:
         try:
             decoded = bdecode(f.read())
@@ -130,17 +170,17 @@ def get_data(root: str, path: str):
             raise ReadBencodedError(path) from e
     if not isinstance(decoded, dict):
         raise ConversionError(f"{root} is not a dict")
-    return BencodeData(root, decoded)
+    return BencodeDictWrapper(root, decoded)
 
 
 # FIXME BEP0003 says that clients must not perform a decode-encode
 # roundtrip on invalid data. this is exactly what this does.
-def calc_info_hash(parsed_tor: BencodeData):
+def calc_info_hash(parsed_tor: BencodeDictWrapper) -> str:
     info = parsed_tor.get_dict(b"info")
-    return hashlib.sha1(bencode(info.data))
+    return hashlib.sha1(bencode(info.unwrap())).hexdigest()
 
 
-def transmission_get_speed_limit(resume_data: BencodeData, key: bytes):
+def transmission_get_speed_limit(resume_data: BencodeDictWrapper, key: bytes) -> int:
     speed_limit_obj = resume_data.get_dict(key)
     if speed_limit_obj.get(int, b"use-speed-limit") != 0:
         return speed_limit_obj.get(int, b"speed-Bps")
@@ -148,9 +188,9 @@ def transmission_get_speed_limit(resume_data: BencodeData, key: bytes):
     return -1
 
 
-def transmission_get_file_prorities(resume_data: BencodeData):
-    priority = resume_data.get_list(b"priority", optional=True)
-    dnd = resume_data.get_list(b"dnd", optional=True)
+def transmission_get_file_prorities(resume_data: BencodeDictWrapper) -> Generator[int]:
+    priority = resume_data.get_list(int, b"priority", optional=True)
+    dnd = resume_data.get_list(int, b"dnd", optional=True)
 
     # Return empty list if priority data is not available
     if priority is None or dnd is None:
@@ -162,10 +202,6 @@ def transmission_get_file_prorities(resume_data: BencodeData):
         )
 
     for i, (p, d) in enumerate(zip(priority, dnd, strict=True)):
-        if not isinstance(p, int):
-            raise ConversionError(f"priority[{i}] is not an int")
-        if not isinstance(d, int):
-            raise ConversionError(f"dnd[{i}] is not an int")
         if d == 1:
             yield 0  # libtorrent::dont_download
         else:
@@ -180,7 +216,7 @@ def transmission_get_file_prorities(resume_data: BencodeData):
                     raise ConversionError(f"Unknown priority[{i}]: {p}")
 
 
-def peers_convert_from_raw_bytes(src: bytes, addr_size: int):
+def peers_convert_from_raw_bytes(src: bytes, addr_size: int) -> bytes:
     rv = bytearray()
     i = 0
     while i < len(src):
@@ -193,7 +229,7 @@ def peers_convert_from_raw_bytes(src: bytes, addr_size: int):
     return bytes(rv)
 
 
-def peers_convert_from_bencoded(src: BencodeList, key: bytes):
+def peers_convert_from_bencoded(src: BencodeList, key: bytes) -> bytes:
     # used since Transmission commit 1054ba4 (earliest release - 4.1.0)
     rv = bytearray()
     for i, d in enumerate(src):
@@ -206,8 +242,10 @@ def peers_convert_from_bencoded(src: BencodeList, key: bytes):
     return bytes(rv)
 
 
-def transmission_get_peers(resume_data: BencodeData, addr_size: int, key: bytes):
-    src = resume_data.data.get(key)
+def transmission_get_peers(
+    resume_data: BencodeDictWrapper, addr_size: int, key: bytes
+) -> bytes:
+    src = resume_data.unwrap().get(key)
     if src is None:
         return b""
 
@@ -220,7 +258,7 @@ def transmission_get_peers(resume_data: BencodeData, addr_size: int, key: bytes)
     raise ConversionError(f"{key} is not a list or a bytes")
 
 
-def transmission_get_limit(tr_resume: BencodeData, limit_kind: str):
+def transmission_get_limit(tr_resume: BencodeDictWrapper, limit_kind: str) -> int:
     limit_key = f"{limit_kind}-limit".encode()
     mode_key = f"{limit_kind}-mode".encode()
 
@@ -241,7 +279,7 @@ def transmission_get_limit(tr_resume: BencodeData, limit_kind: str):
 BLOCK_SIZE = 1 << 14  # 16KiB, standard across torrents
 
 
-def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int):
+def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int) -> bytes:
     # We use masks to determine if torrent pieces are on disk, by extracting progress info
     # from the Transmission resume for the pieces and comparing them to the mask.
     # This method creates the mask for the last piece of the torrent, which is not as trivial
@@ -270,7 +308,9 @@ def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int):
     return piece_mask
 
 
-def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
+def transmission_get_pieces(
+    parsed_tor: BencodeDictWrapper, tr_resume: BencodeDictWrapper
+) -> bytes:
     info = parsed_tor.get_dict(b"info")
     torrent_size = info.get(int, b"length")
     piece_size = info.get(int, b"piece length")
@@ -330,8 +370,8 @@ def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
 
 
 def map_resume_to_qbt(
-    info_hash: str, parsed_tor: BencodeData, resume_data: BencodeData
-):
+    info_hash: str, parsed_tor: BencodeDictWrapper, resume_data: BencodeDictWrapper
+) -> BencodeDict:
     downloading_time_seconds = resume_data.get(int, b"downloading-time-seconds")
     seeding_time_seconds = resume_data.get(int, b"seeding-time-seconds")
     name = resume_data.get(bytes, b"name")
@@ -374,13 +414,13 @@ def map_resume_to_qbt(
     if group is not None:
         qbt_resume_data[b"qBt-category"] = group
 
-    labels = resume_data.get_list(b"labels", optional=True)
+    labels = resume_data.get_list(bytes, b"labels", optional=True)
     if labels is not None:
-        qbt_resume_data[b"qBt-tags"] = labels
+        qbt_resume_data[b"qBt-tags"] = labels.unwrap()
 
-    files = resume_data.get_list(b"files", optional=True)
+    files = resume_data.get_list(bytes, b"files", optional=True)
     if files is not None:
-        qbt_resume_data[b"mapped_files"] = files
+        qbt_resume_data[b"mapped_files"] = files.unwrap()
 
     incomplete_dir = resume_data.get(bytes, b"incomplete_dir", optional=True)
     if incomplete_dir is not None:
@@ -401,7 +441,7 @@ class Args:
 
 
 class TransmissionQbtImporter:
-    def __init__(self, args: Args):
+    def __init__(self, args: Args) -> None:
         check_for_qbt_sqlite_resume_db(args.qbt_bt_backup_dir)
         self.source_torrents_dir = os.path.join(
             args.transmission_config_dir, "torrents"
@@ -416,9 +456,9 @@ class TransmissionQbtImporter:
         self,
         source_tor_abs_path: str,
         info_hash: str,
-        parsed_tor: BencodeData,
-        resume_data: BencodeData,
-    ):
+        parsed_tor: BencodeDictWrapper,
+        resume_data: BencodeDictWrapper,
+    ) -> None:
         qbt_resume_data = map_resume_to_qbt(info_hash, parsed_tor, resume_data)
         qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
@@ -442,13 +482,13 @@ class TransmissionQbtImporter:
         source_tor_abs_path: str,
         source_res_abs_path: str,
         info_hash: str | None,
-    ):
+    ) -> None:
         parsed_tor = get_data("torrent", source_tor_abs_path)
 
         resume_data = get_data("resume", source_res_abs_path)
 
         if info_hash is None:
-            info_hash = calc_info_hash(parsed_tor).hexdigest()
+            info_hash = calc_info_hash(parsed_tor)
 
         if self.predicate is None:
             predicate_rv = True
@@ -468,7 +508,7 @@ class TransmissionQbtImporter:
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
             )
 
-    def import_one(self, torf: str):
+    def import_one(self, torf: str) -> None:
         match = self.torrent_file_300_rgx.fullmatch(torf)
         if match:
             info_hash = match[1]
@@ -492,7 +532,7 @@ class TransmissionQbtImporter:
 
         logging.warning(f"Unknown file {torf} found in torrents directory, skipping")
 
-    def scan(self):
+    def scan(self) -> None:
         for _, _, files in os.walk(self.source_torrents_dir):
             for torf in files:
                 try:
@@ -510,7 +550,7 @@ class TransmissionQbtImporter:
                     logging.warning(f"Failed to decode {str(e)}, skipping")
 
 
-def main():
+def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     parser = argparse.ArgumentParser(
         prog="transmission2qbt",

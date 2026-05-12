@@ -58,7 +58,7 @@ class BencodeData:
         return cast(T, result)
 
     @overload
-    def get_bytes(self, key: bytes, *, optional: Literal[False] = False) -> bytes: ...
+    def get_bytes(self, key: bytes) -> bytes: ...
     @overload
     def get_bytes(self, key: bytes, *, optional: Literal[True]) -> bytes | None: ...
     @overload
@@ -69,7 +69,7 @@ class BencodeData:
         return self._get(key, bytes, optional, default)
 
     @overload
-    def get_int(self, key: bytes, *, optional: Literal[False] = False) -> int: ...
+    def get_int(self, key: bytes) -> int: ...
     @overload
     def get_int(self, key: bytes, *, optional: Literal[True]) -> int | None: ...
     @overload
@@ -80,9 +80,7 @@ class BencodeData:
         return self._get(key, int, optional, default)
 
     @overload
-    def get_list(
-        self, key: bytes, *, optional: Literal[False] = False
-    ) -> BencodeList: ...
+    def get_list(self, key: bytes) -> BencodeList: ...
     @overload
     def get_list(
         self, key: bytes, *, optional: Literal[True]
@@ -100,9 +98,7 @@ class BencodeData:
         return result
 
     @overload
-    def get_dict(
-        self, key: bytes, *, optional: Literal[False] = False
-    ) -> "BencodeData": ...
+    def get_dict(self, key: bytes) -> "BencodeData": ...
     @overload
     def get_dict(
         self, key: bytes, *, optional: Literal[True]

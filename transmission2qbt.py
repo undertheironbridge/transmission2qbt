@@ -266,7 +266,8 @@ def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int):
     last_piece_size = torrent_size % piece_size or piece_size
 
     # Number of blocks in the last piece
-    blocks_in_last_piece = -(-last_piece_size // BLOCK_SIZE)  # Ceiling integer division
+    # Ceiling integer division
+    blocks_in_last_piece = -(-last_piece_size // BLOCK_SIZE)
 
     # Get the start of the mask, made of 1s in groups of 8
     mask_full_bytes = blocks_in_last_piece // 8
@@ -302,15 +303,15 @@ def transmission_get_pieces(parsed_tor: BencodeData, tr_resume: BencodeData):
     blocks = tr_resume.get_dict(b"progress").get_bytes(b"blocks")
 
     # Sanity check the block bytes length
-    expected_num_blocks = -(
-        -torrent_size // BLOCK_SIZE // 8
-    )  # ceiling integer division
+    # ceiling integer division
+    expected_num_blocks = -(-torrent_size // BLOCK_SIZE // 8)
     if len(blocks) != expected_num_blocks:
         raise ConversionError(
             f"resume block length was expected to be {expected_num_blocks} but was {len(blocks)}"
         )
 
-    num_pieces = -(-torrent_size // piece_size)  # ceiling integer division
+    # ceiling integer division
+    num_pieces = -(-torrent_size // piece_size)
 
     # Initialise the return object with 0s
     qbit_pieces = bytearray(num_pieces)

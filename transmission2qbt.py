@@ -66,7 +66,7 @@ class BencodeListWrapper[T: bytes | int](Iterator[T]):
             raise StopIteration
 
         if not isinstance(next_item, self._item_type):
-            raise ConversionError(f"{self._path}[{self._index}] is not bytes")
+            raise ConversionError(f"{self._path}[{self._index}] is not {T}")
         return next_item
 
 
@@ -86,7 +86,7 @@ class BencodeDictWrapper:
     ) -> T | None: ...
     @overload
     def get[T: bytes | int](self, type: type[T], key: bytes, *, default: T) -> T: ...
-    def get[T: bytes | int](
+    def get[T](
         self,
         type: type[T],
         key: bytes,

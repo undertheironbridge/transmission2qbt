@@ -109,7 +109,7 @@ def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str) -> None:
         raise QbtUsesSqliteForResumeError()
 
 
-def get_data(file_path: str, node_path: str) -> BencodeDict:
+def read_bencoded(file_path: str, node_path: str) -> BencodeDict:
     with open(file_path, "rb") as f:
         try:
             decoded = bdecode(f.read())
@@ -424,9 +424,9 @@ class TransmissionQbtImporter:
         source_res_abs_path: str,
         info_hash: str | None,
     ) -> None:
-        torrent = get_data(source_tor_abs_path, "torrent")
+        torrent = read_bencoded(source_tor_abs_path, "torrent")
 
-        resume = get_data(source_res_abs_path, "resume")
+        resume = read_bencoded(source_res_abs_path, "resume")
 
         if info_hash is None:
             info_hash = calc_info_hash(torrent)

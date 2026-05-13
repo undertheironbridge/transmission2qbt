@@ -1,1 +1,2 @@
 bencode.py==4.0.0
+humanize==4.15.0

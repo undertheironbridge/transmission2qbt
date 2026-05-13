@@ -14,6 +14,7 @@ import hashlib
 
 
 import bencodepy
+from humanize import naturalsize
 
 
 class ConversionError(RuntimeError):
@@ -38,7 +39,6 @@ class QbtUsesSqliteForResumeError(RuntimeError):
 type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
 
 
-@dataclass(frozen=True)
 class BencodeNode[T: BencodeType](NamedTuple):
     # A class for convenience, which carries the full path of the node
     # e.g. value=xxx, path="torrent.info.length"
@@ -267,8 +267,11 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     # (where n=piece_size//BLOCK_SIZE//8), and checking that they are all 0xff
     # For this to work without having to do bitwise operations, the piece size must be at least 8x the block size
     # The block size is 16KiB so the minimum piece size is 128KiB
-    if piece_size < 1 << 17:  # 128KiB
-        raise ConversionError(f"Piece size {piece_size} is lower than 128KiB, aborting")
+    min_piece_size = 8 * BLOCK_SIZE
+    if piece_size < min_piece_size:
+        raise ConversionError(
+            f"Piece size {naturalsize(min_piece_size, binary=True)} is lower than {naturalsize(min_piece_size, binary=True)}, aborting"
+        )
 
     progress = get_child(resume, b"progress", dict[bytes, BencodeType])
     blocks, _ = get_child(progress, b"blocks", bytes)
@@ -315,7 +318,7 @@ def map_resume_to_qbt(
     info_hash: str, torrent: BencodeDict, resume: BencodeDict
 ) -> dict[bytes, BencodeType]:
     downloading_time_seconds, _ = get_child(resume, b"downloading-time-seconds", int)
-    seeding_time_seconds, _ = get_child(resume, b"seeding-time-second", int)
+    seeding_time_seconds, _ = get_child(resume, b"seeding-time-seconds", int)
     name, _ = get_child(resume, b"name", bytes)
     paused, _ = get_child(resume, b"paused", int)
 
@@ -378,6 +381,7 @@ class Args:
     qbt_bt_backup_dir: str
     transmission_config_dir: str
     predicate: str | None
+    dry_run: bool
 
 
 class TransmissionQbtImporter:
@@ -386,11 +390,12 @@ class TransmissionQbtImporter:
         self.source_torrents_dir = os.path.join(
             args.transmission_config_dir, "torrents"
         )
-        self.source_resume_dir = os.path.join(args.transmission_config_dir, "resume")
-        self.target_dir = args.qbt_bt_backup_dir
-        self.predicate = args.predicate
-        self.torrent_file_300_rgx = re.compile("([0-9a-f]{40})\\.torrent")
-        self.torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
+        self._source_resume_dir = os.path.join(args.transmission_config_dir, "resume")
+        self._target_dir = args.qbt_bt_backup_dir
+        self._predicate = args.predicate
+        self._dry_run = args.dry_run
+        self._torrent_file_300_rgx = re.compile("([0-9a-f]{40})\\.torrent")
+        self._torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
 
     def copy_to_target(
         self,
@@ -398,24 +403,34 @@ class TransmissionQbtImporter:
         info_hash: str,
         torrent: BencodeDict,
         resume: BencodeDict,
+        dry_run: bool,
     ) -> None:
         qbt_resume_data = map_resume_to_qbt(info_hash, torrent, resume)
-        qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
-        qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
-        try:
-            with open(qbt_resume_path, "wb") as resumf:
-                resumf.write(bencode(qbt_resume_data))
-            shutil.copy(source_tor_abs_path, qbt_torrent_path)
+        qbt_resume_enc = bencode(qbt_resume_data)
+        qbt_resume_path = os.path.join(self._target_dir, info_hash + ".fastresume")
+        qbt_torrent_path = os.path.join(self._target_dir, info_hash + ".torrent")
+        if dry_run:
             logging.info(
-                f"Successfully imported {os.path.basename(source_tor_abs_path)} ({info_hash})"
+                f"dry run: would save {naturalsize(len(qbt_resume_enc), binary=True)} to {qbt_resume_path}"
             )
+            logging.info(
+                f"dry run: would copy {source_tor_abs_path} to {qbt_torrent_path}"
+            )
+        else:
+            try:
+                with open(qbt_resume_path, "wb") as resumf:
+                    resumf.write(qbt_resume_enc)
+                shutil.copy(source_tor_abs_path, qbt_torrent_path)
+                logging.info(
+                    f"Successfully imported {os.path.basename(source_tor_abs_path)} ({info_hash})"
+                )
 
-        except:
-            logging.warning(
-                f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {self.target_dir}"
-            )
-            rm_f(qbt_resume_path)
-            rm_f(qbt_torrent_path)
+            except:
+                logging.warning(
+                    f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {self._target_dir}"
+                )
+                rm_f(qbt_resume_path)
+                rm_f(qbt_torrent_path)
 
     def copy_if_wanted(
         self,
@@ -430,11 +445,11 @@ class TransmissionQbtImporter:
         if info_hash is None:
             info_hash = calc_info_hash(torrent)
 
-        if self.predicate is None:
+        if self._predicate is None:
             predicate_rv = True
         else:
             try:
-                predicate_rv = eval(self.predicate)
+                predicate_rv = eval(self._predicate)
             except Exception as e:
                 logging.info(
                     f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
@@ -442,29 +457,31 @@ class TransmissionQbtImporter:
                 return
 
         if predicate_rv is True:
-            self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
+            self.copy_to_target(
+                source_tor_abs_path, info_hash, torrent, resume, self._dry_run
+            )
         else:
             logging.info(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
             )
 
     def import_one(self, torf: str) -> None:
-        match = self.torrent_file_300_rgx.fullmatch(torf)
+        match = self._torrent_file_300_rgx.fullmatch(torf)
         if match:
             info_hash = match[1]
             self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
-                os.path.join(self.source_resume_dir, info_hash + ".resume"),
+                os.path.join(self._source_resume_dir, info_hash + ".resume"),
                 match[1],
             )
             return
 
-        match = self.torrent_file_294_rgx.search(torf)
+        match = self._torrent_file_294_rgx.search(torf)
         if match:
             self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
                 os.path.join(
-                    self.source_resume_dir, os.path.splitext(torf)[0] + ".resume"
+                    self._source_resume_dir, os.path.splitext(torf)[0] + ".resume"
                 ),
                 None,
             )
@@ -499,18 +516,22 @@ def main() -> int:
     )
     parser.add_argument(
         "transmission_config_dir",
-        action="store",
         help="The root configuration directory of the Transmission instance whose torrents to import",
     )
     parser.add_argument(
         "qbt_bt_backup_dir",
-        action="store",
         help="The BT_backup directory inside target qBittorrent instance's data directory",
     )
     parser.add_argument(
         "--predicate",
-        action="store",
+        "-p",
         help="A Python expression for filtering source torrents",
+    )
+    parser.add_argument(
+        "--dry-run",
+        "-d",
+        action="store_true",
+        help="Optional flag to not write any data to disk",
     )
 
     args = cast(Args, parser.parse_args())

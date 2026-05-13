@@ -10,7 +10,7 @@ Python is not my native language, so please bear with me.
 Most of the tools I could find simply used qBt's Web API to import torrents.
 This is fine for most usages but I wanted to keep some of the metadata that's
 saved in resume files, notably the original "added date" as well as the amount
-of data transferred so far.
+of data transferred so far and the completion state of the torrent.
 
 # Tested combinations
 
@@ -59,16 +59,16 @@ Shut down both Transmission and qBittorrent and do :
 
 The `--predicate` argument accepts a Python expression that can be used for
 filtering torrents which are going to be imported to qBt. The parsed torrent
-file is named `parsed_tor` and its associated Transmission resume data is
-`resume_data`. If the expression returns anything other than `True` or throws
+file is named `torrent.value` and its associated Transmission resume data is
+`resume.value`. If the expression returns anything other than `True` or throws
 an exception, the torrent is skipped.
 
 For example, this will only cause torrents using Debian's tracker whose name
 includes `amd64` to be imported :
 
 ```
-parsed_tor[b'announce'] == b'http://bttracker.debian.org:6969/announce'
-and b'amd64' in parsed_tor[b'info'][b'name']
+torrent.value[b'announce'] == b'http://bttracker.debian.org:6969/announce'
+and b'amd64' in torrent.value[b'info'][b'name']
 ```
 
 # Mappings
@@ -110,11 +110,22 @@ then the location you want is `${profile_dir}/qBittorrent/data/BT_backup`.
 
 # Limitations
 
-* I couldn't figure out how to import Transmission data about the already
-available pieces, which means that all torrents will automatically be re-checked
-when qBittorrent is first run after the migration.
+## Download progress
 
-* If your Transmission is set to append `.part` to incomplete files, make sure
+qBittorrent and Transmission have a different approach to storing information about what data is already on disk:
+* Transmission keeps track of the status of each 16KiB block (in `resume[b"progress"][b"blocks]`, which is a bitmask where each bit represents a block). The state of each piece is not explicity stored in the resume file (but is implicitly there since each piece is made of 2^n consecutive blocks).
+* qBittorrent keeps track separately of:
+  * Which pieces are complete (in `resume[b"pieces"]`).
+  * Which blocks are complete in each incomplete piece (in `resume[b"unfinished"]`).
+With this in mind, **this script only concerns itself with complete pieces**, i.e. the `pieces` section of the qBittorrent resume file is calculated but the `unfinished` section is omitted.
+It should be possible to build it, but:
+- This would almost certainly significantly slow down the script. The pieces calculation only leverages data in the resume files, but calculating the unfinished field requires computing checksums of the actual torrent data.
+- The only effect of not calculating the field is to **discard partially downloaded pieces**. This should always be a very low amount of data for qBittorrent to download again.
+- As a workaround, force-rechecking all incomplete torrents once the migration is complete should recover the information (not tested).
+
+## Incomplete files
+
+If your Transmission is set to append `.part` to incomplete files, make sure
 you remove that suffix before running the migration, otherwise qBittorrent won't
 detect those files at all. Once qBt detects that a file is incomplete, it will
 append `.!qBt` itself if that option is enabled. This command will remove the

@@ -317,7 +317,7 @@ def map_resume_to_qbt(
     downloading_time_seconds, _ = get_child(resume, b"downloading-time-seconds", int)
     seeding_time_seconds, _ = get_child(resume, b"seeding-time-second", int)
     name, _ = get_child(resume, b"name", bytes)
-    paused, __ = get_child(resume, b"paused", int)
+    paused, _ = get_child(resume, b"paused", int)
 
     qbt_resume_data: BencodeType = {
         b"file-format": b"libtorrent resume file",

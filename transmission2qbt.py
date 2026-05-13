@@ -49,50 +49,50 @@ class BencodeNode[T: BencodeType](NamedTuple):
 type BencodeDict = BencodeNode[dict[bytes, BencodeType]]
 
 
-def build_bencode_node[T: BencodeType](
-    type_dest: type[T], value: BencodeType, path: str
+def build_node[T: BencodeType](
+    type: type[T], value: BencodeType, path: str
 ) -> BencodeNode[T]:
     # origin is the parent class for generics (e.g. list for list[int])
     # origin is none for non-generics
     # isinstance does not work on generics but it works on the origin of a generic
     # cast works on the generic itself so type inference works
-    typecheck = get_origin(type_dest) or type_dest
+    typecheck = get_origin(type) or type
     if not isinstance(value, typecheck):
         raise ConversionError(f"f{path} is not of type {typecheck}")
     return BencodeNode(cast(T, value), path)
 
 
 @overload
-def get[T: BencodeType](
-    type_dest: type[T],
-    data: BencodeNode[dict[bytes, BencodeType]],
-    key: bytes,
+def get_child[T: BencodeType](
+    parent: BencodeNode[dict[bytes, BencodeType]],
+    child_name: bytes,
+    child_type: type[T],
     *,
     default: T | None = None,
 ) -> BencodeNode[T]: ...
 @overload
-def get[T: BencodeType](
-    type_dest: type[T],
-    data: BencodeNode[dict[bytes, BencodeType]],
-    key: bytes,
+def get_child[T: BencodeType](
+    parent: BencodeNode[dict[bytes, BencodeType]],
+    child_name: bytes,
+    child_type: type[T],
     *,
     optional: Literal[True],
 ) -> BencodeNode[T] | None: ...
-def get[T: BencodeType](
-    type_dest: type[T],
-    data: BencodeNode[dict[bytes, BencodeType]],
-    key: bytes,
+def get_child[T: BencodeType](
+    parent: BencodeNode[dict[bytes, BencodeType]],
+    child_name: bytes,
+    child_type: type[T],
     *,
     default: T | None = None,
     optional: bool = False,
 ) -> BencodeNode[T] | None:
-    value = data.value.get(key, default)
-    path = f"{data.path}.{key.decode()}"
-    if value is None:
+    child_value = parent.value.get(child_name, default)
+    child_path = f"{parent.path}.{child_name.decode()}"
+    if child_value is None:
         if optional:
             return None
-        raise ConversionError(f"{path} is missing")
-    return build_bencode_node(type_dest, value, path)
+        raise ConversionError(f"{child_path} is missing")
+    return build_node(child_type, child_value, child_path)
 
 
 def bencode(data: BencodeType) -> bytes:
@@ -109,34 +109,34 @@ def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str) -> None:
         raise QbtUsesSqliteForResumeError()
 
 
-def get_data(root_path: str, file_path: str) -> BencodeDict:
+def get_data(file_path: str, node_path: str) -> BencodeDict:
     with open(file_path, "rb") as f:
         try:
             decoded = bdecode(f.read())
         except (ValueError, bencodepy.BencodeDecodeError) as e:
             raise ReadBencodedError(file_path) from e
-    return build_bencode_node(dict[bytes, BencodeType], decoded, root_path)
+    return build_node(dict[bytes, BencodeType], decoded, node_path)
 
 
 # FIXME BEP0003 says that clients must not perform a decode-encode
 # roundtrip on invalid data. this is exactly what this does.
-def calc_info_hash(parsed_tor: BencodeDict) -> str:
-    info, _ = get(dict[bytes, BencodeType], parsed_tor, b"info")
+def calc_info_hash(torrent: BencodeDict) -> str:
+    info, _ = get_child(torrent, b"info", dict[bytes, BencodeType])
     return hashlib.sha1(bencode(info)).hexdigest()
 
 
-def transmission_get_speed_limit(resume_data: BencodeDict, key: bytes) -> int:
-    speed_limit_obj = get(dict[bytes, BencodeType], resume_data, key)
-    use_speed_limit, _ = get(int, speed_limit_obj, b"use-speed-limit")
+def transmission_get_speed_limit(resume: BencodeDict, key: bytes) -> int:
+    speed_limit_obj = get_child(resume, key, dict[bytes, BencodeType])
+    use_speed_limit, _ = get_child(speed_limit_obj, b"use-speed-limit", int)
     if use_speed_limit != 0:
-        return get(int, speed_limit_obj, b"speed-Bps").value
+        return get_child(speed_limit_obj, b"speed-Bps", int).value
 
     return -1
 
 
-def transmission_get_file_prorities(resume_data: BencodeDict) -> Generator[int]:
-    priority_node = get(list[BencodeType], resume_data, b"priority", optional=True)
-    dnd_node = get(list[BencodeType], resume_data, b"dnd", optional=True)
+def transmission_get_file_prorities(resume: BencodeDict) -> Generator[int]:
+    priority_node = get_child(resume, b"priority", list[BencodeType], optional=True)
+    dnd_node = get_child(resume, b"dnd", list[BencodeType], optional=True)
 
     # Return empty list if priority data is not available
     if priority_node is None or dnd_node is None:
@@ -182,16 +182,14 @@ def peers_convert_from_bencoded(src: list[BencodeType], key: bytes) -> bytes:
     rv = bytearray()
     for i, d in enumerate(src):
         d_path = f"{key}[{i}]"
-        d_dict = build_bencode_node(dict[bytes, BencodeType], d, d_path)
-        socket_address = get(bytes, d_dict, b"socket_address").value
+        d_dict = build_node(dict[bytes, BencodeType], d, d_path)
+        socket_address = get_child(d_dict, b"socket_address", bytes).value
         rv += socket_address
     return bytes(rv)
 
 
-def transmission_get_peers(
-    resume_data: BencodeDict, addr_size: int, key: bytes
-) -> bytes:
-    src = resume_data.value.get(key)
+def transmission_get_peers(resume: BencodeDict, addr_size: int, key: bytes) -> bytes:
+    src = resume.value.get(key)
     if src is None:
         return b""
 
@@ -204,18 +202,18 @@ def transmission_get_peers(
     raise ConversionError(f"{key} is not a list or bytes")
 
 
-def transmission_get_limit(tr_resume: BencodeDict, limit_kind: str) -> int:
+def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
     limit_key = f"{limit_kind}-limit".encode()
-    limit_obj = get(dict[bytes, BencodeType], tr_resume, limit_key)
+    limit_obj = get_child(resume, limit_key, dict[bytes, BencodeType])
 
     mode_key = f"{limit_kind}-mode".encode()
-    limit_mode, _ = get(int, limit_obj, mode_key)
+    limit_mode, _ = get_child(limit_obj, mode_key, int)
 
     match limit_mode:
         case 0:  # TR_*LIMIT_GLOBAL
             return -2  # BitTorrent::Torrent::USE_GLOBAL_*
         case 1:  # TR_*LIMIT_SINGLE
-            return get(int, limit_obj, limit_key).value
+            return get_child(limit_obj, limit_key, int).value
         case 2:  # TR_*LIMIT_UNLIMITED
             return -1  # BitTorrent::Torrent::NO_*_LIMIT
         case _:
@@ -254,10 +252,10 @@ def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int) -
     return piece_mask
 
 
-def transmission_get_pieces(parsed_tor: BencodeDict, tr_resume: BencodeDict) -> bytes:
-    info = get(dict[bytes, BencodeType], parsed_tor, b"info")
-    torrent_size, _ = get(int, info, b"length")
-    piece_size, _ = get(int, info, b"piece length")
+def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
+    info = get_child(torrent, b"info", dict[bytes, BencodeType])
+    torrent_size, _ = get_child(info, b"length", int)
+    piece_size, _ = get_child(info, b"piece length", int)
 
     # Sanity check the piece length
     # Only accept piece size in powers of 2
@@ -273,8 +271,8 @@ def transmission_get_pieces(parsed_tor: BencodeDict, tr_resume: BencodeDict) -> 
     if piece_size < 1 << 17:  # 128KiB
         raise ConversionError(f"Piece size {piece_size} is lower than 128KiB, aborting")
 
-    progress = get(dict[bytes, BencodeType], tr_resume, b"progress")
-    blocks, _ = get(bytes, progress, b"blocks")
+    progress = get_child(resume, b"progress", dict[bytes, BencodeType])
+    blocks, _ = get_child(progress, b"blocks", bytes)
 
     # Sanity check the block bytes length
     # ceiling integer division
@@ -315,62 +313,58 @@ def transmission_get_pieces(parsed_tor: BencodeDict, tr_resume: BencodeDict) -> 
 
 
 def map_resume_to_qbt(
-    info_hash: str, parsed_tor: BencodeDict, resume_data: BencodeDict
+    info_hash: str, torrent: BencodeDict, resume: BencodeDict
 ) -> dict[bytes, BencodeType]:
-    downloading_time_seconds, _ = get(int, resume_data, b"downloading-time-seconds")
-    seeding_time_seconds, _ = get(int, resume_data, b"seeding-time-second")
-    name, _ = get(bytes, resume_data, b"name")
-    paused, __ = get(int, resume_data, b"paused")
+    downloading_time_seconds, _ = get_child(resume, b"downloading-time-seconds", int)
+    seeding_time_seconds, _ = get_child(resume, b"seeding-time-second", int)
+    name, _ = get_child(resume, b"name", bytes)
+    paused, __ = get_child(resume, b"paused", int)
 
     qbt_resume_data: BencodeType = {
         b"file-format": b"libtorrent resume file",
         b"file-version": 1,
         b"info-hash": binascii.unhexlify(info_hash),
         b"name": name,
-        b"total_uploaded": get(int, resume_data, b"uploaded").value,
-        b"total_downloaded": get(int, resume_data, b"downloaded").value,
-        b"added_time": get(int, resume_data, b"added-date").value,
-        b"completed_time": get(int, resume_data, b"done-date").value,
+        b"total_uploaded": get_child(resume, b"uploaded", int).value,
+        b"total_downloaded": get_child(resume, b"downloaded", int).value,
+        b"added_time": get_child(resume, b"added-date", int).value,
+        b"completed_time": get_child(resume, b"done-date", int).value,
         b"active_time": downloading_time_seconds + seeding_time_seconds,
         b"finished_time": downloading_time_seconds,
         b"seeding_time": seeding_time_seconds,
-        b"max_connections": get(int, resume_data, b"max-peers").value,
-        b"upload_rate_limit": transmission_get_speed_limit(
-            resume_data, b"speed-limit-up"
-        ),
+        b"max_connections": get_child(resume, b"max-peers", int).value,
+        b"upload_rate_limit": transmission_get_speed_limit(resume, b"speed-limit-up"),
         b"download_rate_limit": transmission_get_speed_limit(
-            resume_data, b"speed-limit-down"
+            resume, b"speed-limit-down"
         ),
-        b"save_path": get(bytes, resume_data, b"destination").value,
+        b"save_path": get_child(resume, b"destination", bytes).value,
         b"paused": paused,
-        b"sequential_download": get(
-            int, resume_data, b"sequentialDownload", default=0
+        b"sequential_download": get_child(
+            resume, b"sequentialDownload", int, default=0
         ).value,
-        b"file_priority": list(transmission_get_file_prorities(resume_data)),
-        b"peers": transmission_get_peers(resume_data, 4, b"peers2"),
-        b"peers6": transmission_get_peers(resume_data, 16, b"peers2-6"),
+        b"file_priority": list(transmission_get_file_prorities(resume)),
+        b"peers": transmission_get_peers(resume, 4, b"peers2"),
+        b"peers6": transmission_get_peers(resume, 16, b"peers2-6"),
         b"qBt-name": name,
-        b"qBt-ratioLimit": transmission_get_limit(resume_data, "ratio"),
-        b"qBt-inactiveSeedingTimeLimit": int(
-            transmission_get_limit(resume_data, "idle")
-        ),
-        b"qBt-savePath": get(bytes, resume_data, b"destination").value,
-        b"pieces": transmission_get_pieces(parsed_tor, resume_data),
+        b"qBt-ratioLimit": transmission_get_limit(resume, "ratio"),
+        b"qBt-inactiveSeedingTimeLimit": int(transmission_get_limit(resume, "idle")),
+        b"qBt-savePath": get_child(resume, b"destination", bytes).value,
+        b"pieces": transmission_get_pieces(torrent, resume),
     }
 
-    group = get(bytes, resume_data, b"group", optional=True)
+    group = get_child(resume, b"group", bytes, optional=True)
     if group is not None:
         qbt_resume_data[b"qBt-category"] = group.value
 
-    labels = get(list[BencodeType], resume_data, b"labels", optional=True)
+    labels = get_child(resume, b"labels", list[BencodeType], optional=True)
     if labels is not None:
         qbt_resume_data[b"qBt-tags"] = labels.value
 
-    files = get(list[BencodeType], resume_data, b"files", optional=True)
+    files = get_child(resume, b"files", list[BencodeType], optional=True)
     if files is not None:
         qbt_resume_data[b"mapped_files"] = files.value
 
-    incomplete_dir = get(bytes, resume_data, b"incomplete_dir", optional=True)
+    incomplete_dir = get_child(resume, b"incomplete_dir", bytes, optional=True)
     if incomplete_dir is not None:
         qbt_resume_data[b"qBt-downloadPath"] = incomplete_dir.value
 
@@ -403,10 +397,10 @@ class TransmissionQbtImporter:
         self,
         source_tor_abs_path: str,
         info_hash: str,
-        parsed_tor: BencodeDict,
-        resume_data: BencodeDict,
+        torrent: BencodeDict,
+        resume: BencodeDict,
     ) -> None:
-        qbt_resume_data = map_resume_to_qbt(info_hash, parsed_tor, resume_data)
+        qbt_resume_data = map_resume_to_qbt(info_hash, torrent, resume)
         qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
         try:
@@ -430,12 +424,12 @@ class TransmissionQbtImporter:
         source_res_abs_path: str,
         info_hash: str | None,
     ) -> None:
-        parsed_tor = get_data("torrent", source_tor_abs_path)
+        torrent = get_data(source_tor_abs_path, "torrent")
 
-        resume_data = get_data("resume", source_res_abs_path)
+        resume = get_data(source_res_abs_path, "resume")
 
         if info_hash is None:
-            info_hash = calc_info_hash(parsed_tor)
+            info_hash = calc_info_hash(torrent)
 
         if self.predicate is None:
             predicate_rv = True
@@ -449,7 +443,7 @@ class TransmissionQbtImporter:
                 return
 
         if predicate_rv is True:
-            self.copy_to_target(source_tor_abs_path, info_hash, parsed_tor, resume_data)
+            self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
         else:
             logging.info(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"

@@ -180,10 +180,9 @@ def peers_convert_from_raw_bytes(src: bytes, addr_size: int) -> bytes:
 def peers_convert_from_bencoded(src: list[BencodeType], key: bytes) -> bytes:
     # used since Transmission commit 1054ba4 (earliest release - 4.1.0)
     rv = bytearray()
-    for i, d in enumerate(src):
-        d_path = f"{key}[{i}]"
-        d_dict = build_node(dict[bytes, BencodeType], d, d_path)
-        socket_address = get_child(d_dict, b"socket_address", bytes).value
+    for i, x in enumerate(src):
+        d = build_node(dict[bytes, BencodeType], x, f"{key}[{i}]")
+        socket_address, _ = get_child(d, b"socket_address", bytes)
         rv += socket_address
     return bytes(rv)
 

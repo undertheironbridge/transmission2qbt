@@ -326,7 +326,7 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
         raise ConversionError(
             f"Piece size {piece_size} is not a multiple of {naturalsize(BLOCK_SIZE, binary=True)}, aborting"
         )
-    
+
     blocks_per_piece = piece_size // BLOCK_SIZE
     # ceiling integer division
     num_pieces = -(-torrent_size // piece_size)
@@ -451,13 +451,12 @@ class TransmissionQbtImporter:
         info_hash: str,
         torrent: BencodeDict,
         resume: BencodeDict,
-        dry_run: bool,
     ) -> None:
         qbt_resume_data = map_resume_to_qbt(info_hash, torrent, resume)
         qbt_resume_enc = bencode(qbt_resume_data)
         qbt_resume_path = os.path.join(self._target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self._target_dir, info_hash + ".torrent")
-        if dry_run:
+        if self._dry_run:
             logging.info(
                 f"dry run: would save {naturalsize(len(qbt_resume_enc), binary=True)} to {qbt_resume_path}"
             )
@@ -505,9 +504,7 @@ class TransmissionQbtImporter:
                 return
 
         if predicate_rv is True:
-            self.copy_to_target(
-                source_tor_abs_path, info_hash, torrent, resume, self._dry_run
-            )
+            self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
         else:
             logging.info(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"

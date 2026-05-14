@@ -242,10 +242,10 @@ def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
 #
 # The piece size is a multiple of the block size, but not always a multiple of 8*16KiB (the data chunk represented by a tr_blocks byte).
 # Which means that a tr_blocks byte might represent more than one qb_pieces byte, and vice versa; it also means that the first block of each
-# piece will not necessarily be aligned with the leftmost bit of a tr_blocks byte.
+# piece will not necessarily be aligned with the leftmost bit of a tr_blocks byte, or the last block with the rightmost bit of a byte.
 #
-# So to understand which pieces are fully on disk (which is what we need to build qb_pieces), we need to extract piece_blocks for each piece
-# in tr_blocks, and check if they are all 1.
+# So to understand which pieces are fully on disk (which is what we need in order to build qb_pieces), we need to extract piece_blocks for
+# each piece in tr_blocks, and check if they are all 1.
 # We start by finding what tr_block byte the piece starts and ends with. It might start midway through a byte (i.e. not the leftmost bit of
 # the start byte) and likewise it might end midway through a byte (not the rightmost bit of the end byte). For this reason the first and last
 # byte are checked using a bitwise masking operation, with a precalculated dict of masks indexed with the order of the first and last bit.
@@ -400,14 +400,18 @@ def map_resume_to_qbt(
             resume, b"sequentialDownload", int, default=0
         ).value,
         b"file_priority": list(transmission_get_file_priorities(resume)),
-        b"peers": transmission_get_peers(resume, 4, b"peers2"),
-        b"peers6": transmission_get_peers(resume, 16, b"peers2-6"),
         b"qBt-name": name,
         b"qBt-ratioLimit": transmission_get_limit(resume, "ratio"),
         b"qBt-inactiveSeedingTimeLimit": int(transmission_get_limit(resume, "idle")),
         b"qBt-savePath": get_child(resume, b"destination", bytes).value,
         b"pieces": transmission_get_pieces(torrent, resume),
     }
+
+    info = get_child(torrent, b"info", dict[bytes, BencodeType])
+    private, _ = get_child(info, b"private", int, default=0)
+    if not private:
+        qbt_resume_data[b"peers"] = transmission_get_peers(resume, 4, b"peers2")
+        qbt_resume_data[b"peers6"] = transmission_get_peers(resume, 16, b"peers2-6")
 
     group = get_child(resume, b"group", bytes, optional=True)
     if group is not None:

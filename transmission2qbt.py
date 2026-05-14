@@ -503,7 +503,7 @@ class TransmissionQbtImporter:
                 )
                 return
 
-        if predicate_rv is True:
+        if predicate_rv:
             self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
         else:
             logging.info(

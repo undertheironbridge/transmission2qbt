@@ -134,7 +134,7 @@ def transmission_get_speed_limit(resume: BencodeDict, key: bytes) -> int:
     return -1
 
 
-def transmission_get_file_prorities(resume: BencodeDict) -> Generator[int]:
+def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
     priority_node = get_child(resume, b"priority", list[BencodeType], optional=True)
     dnd_node = get_child(resume, b"dnd", list[BencodeType], optional=True)
 
@@ -220,98 +220,148 @@ def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
 
 
 BLOCK_SIZE = 1 << 14  # 16KiB, standard across torrents
+FIRST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF >> i for i in range(0, 8)}
+LAST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF << 7 - i & 0xFF for i in range(0, 8)}
 
 
-def get_last_piece_mask_for_block_checking(torrent_size: int, piece_size: int) -> bytes:
-    # We use masks to determine if torrent pieces are on disk, by extracting progress info
-    # from the Transmission resume for the pieces and comparing them to the mask.
-    # This method creates the mask for the last piece of the torrent, which is not as trivial
-    # as for the other pieces (where the mask is just 1s)
-    # This method is used by transmission_get_pieces
+def is_piece_complete(
+    tr_blocks: bytes, piece_index: int, blocks_per_piece: int, num_blocks: int
+):
+    # The blocks data the in Transmission resume (tr_blocks) is a bitmask in the form of a bytes object (an immutable array of bytes, aka a
+    # binary string).
+    # Each byte represents 8 blocks: each bit in that byte represents a single block, i.e. a 16KiB chunk of torrent data.
+    # Each bit is equal to 1 if the block is on disk, 0 if not.
+    #
+    # The pieces data in the qBittorrent/libtorrent resume (qb_pieces) is also a bytes object but not a bitmask: each byte represent a piece,
+    # and is equal to 0x01 if the piece is on disk, 0x00 if not (only one of the 8 bits is used in each byte, the first 7 bits are always 0).
+    #
+    # Blocks are the atomic amount of data used for storage. Pieces are used in the hash calculation (in Bittorrent v1), the protocol, and in
+    # the resume files, such as qb_pieces here.
+    # There is an additional field (unfinished) in the qBittorrent resume to store block info for incomplete pieces, but this field is ignored
+    # here, see README.md.
+    #
+    # The piece size is a multiple of the block size, but not always a multiple of 8*16KiB (the data chunk represented by a tr_blocks byte).
+    # Which means that a tr_blocks byte might represent more than one qb_pieces byte, and vice versa; it also means that the first block of each
+    # piece will not necessarily be aligned with the leftmost bit of a tr_blocks byte.
+    #
+    # So to understand which pieces are fully on disk (which is what we need to build qb_pieces), we need to extract piece_blocks for each piece
+    # in tr_blocks, and check if they are all 1.
+    # We start by finding what tr_block byte the piece starts and ends with. It might start midway through a byte (i.e. not the leftmost bit of
+    # the start byte) and likewise it might end midway through a byte (not the rightmost bit of the end byte). For this reason the first and last
+    # byte are checked using a bitwise masking operation, with a precalculated dict of masks indexed with the order of the first and last bit.
+    # For instance, if the start bit order is 3, then the mask is 00011111 (0x1f). We mask the byte coming from tr_blocks against this
+    # i.e. tr_blocks[piece_start] & 0x1f == 0x1f. The masks for the end bit order are reversed i.e. if the bit order is 3, the mask is
+    # 11110000 (0xf0) so we will check if tr_blocks[piece_end] & 0xf0 == 0xf0.
+    # All the tr_blocks bytes between the first and the last are fully part of the piece, so if the piece is complete the block bytes are all
+    # 0xff. No need to mask for these, we can just compare them all to 0xff.
+    #
+    # There is a special case when a piece is fully contained within a block byte (which only happens when the piece length is <= 8*16KiB).
+    # In this case there is only one block byte to check and we need to mask it against both the start and end mask.
+    #
+    # We also need to take in account that the total number of blocks might not align with the end of a piece, i.e. the last piece can be smaller.
+    #
+    # In another special case, tr_blocks might contain fewer bytes than expected, because Transmission does not write the end of tr_blocks when the
+    # end of the torrent is not on disk (it will only write up to the last block that is on disk). For that reason when retrieving a piece we might
+    # get fewer bytes than expected. In that case we need to return False since it means that the piece is not on disk.
+    #
+    # Finally, Transmission sets the whole tr_blocks to b"all" for complete torrents and b"none" for empty torrents, so these special cases must
+    # be dealt with separately.
 
-    # Size of the last piece
-    # Note that in the special case where the torrent size is a multiple of the piece size,
-    # the last piece has the same size as all the other pieces
-    last_piece_size = torrent_size % piece_size or piece_size
+    # Indexes of the first block of the piece
+    # In total blocks
+    piece_start_in_overall_blocks = piece_index * blocks_per_piece
+    # In tr_blocks
+    piece_start_in_block_bytes = piece_start_in_overall_blocks // 8
+    # in the specific tr_blocks byte
+    piece_start_bit_order = piece_start_in_overall_blocks % 8
 
-    # Number of blocks in the last piece
-    # Ceiling integer division
-    blocks_in_last_piece = -(-last_piece_size // BLOCK_SIZE)
+    # Indexes of the last block of the piece
+    # In total blocks
+    piece_end_in_overall_blocks = (
+        min(piece_start_in_overall_blocks + blocks_per_piece, num_blocks) - 1
+    )
+    # In tr_blocks
+    piece_end_in_block_bytes = piece_end_in_overall_blocks // 8
+    # in the specific tr_blocks byte
+    piece_end_bit_order = piece_end_in_overall_blocks % 8
 
-    # Get the start of the mask, made of 1s in groups of 8
-    mask_full_bytes = blocks_in_last_piece // 8
-    piece_mask = b"\xff" * mask_full_bytes
-
-    # Append last byte of the mask: 1s followed by 0s
-    mask_extra_bits = blocks_in_last_piece % 8
-    if mask_extra_bits:
-        # Create a byte made of n 1s followed by (8-n) 0s
-        piece_mask += bytes([0xFF << 8 - mask_extra_bits & 0xFF])
-
-    return piece_mask
+    num_piece_bytes = piece_end_in_block_bytes - piece_start_in_block_bytes + 1
+    piece_bytes = tr_blocks[
+        piece_start_in_block_bytes : piece_start_in_block_bytes + num_piece_bytes
+    ]
+    if len(piece_bytes) < num_piece_bytes:
+        # tr_blocks is shorter than expected, meaning the piece is not complete
+        return False
+    first_byte_mask = FIRST_BYTE_MASK_BY_BIT_ORDER[piece_start_bit_order]
+    last_byte_mask = LAST_BYTE_MASK_BY_BIT_ORDER[piece_end_bit_order]
+    if num_piece_bytes == 1:
+        byte_mask = first_byte_mask & last_byte_mask
+        return piece_bytes[0] & byte_mask == byte_mask
+    if piece_bytes[0] & first_byte_mask != first_byte_mask:
+        return False
+    if piece_bytes[-1] & last_byte_mask != last_byte_mask:
+        return False
+    return piece_bytes[1:-1] == b"\xff" * (num_piece_bytes - 2)
 
 
 def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     info = get_child(torrent, b"info", dict[bytes, BencodeType])
-    torrent_size, _ = get_child(info, b"length", int)
+    torrent_size_node = get_child(info, b"length", int, optional=True)
+    if torrent_size_node is None:
+        files, files_path = get_child(info, b"files", list[BencodeType])
+        torrent_size = 0
+        for i, f in enumerate(files):
+            file_dict = build_node(dict[bytes, BencodeType], f, f"{files_path}[{i}]")
+            torrent_size += get_child(file_dict, b"length", int).value
+    else:
+        torrent_size, _ = torrent_size_node
     piece_size, _ = get_child(info, b"piece length", int)
 
-    # Sanity check the piece length
-    # Only accept piece size in powers of 2
-    if piece_size & -piece_size != piece_size:  # This is only true for powers of 2
-        raise ConversionError(f"Piece size {piece_size} is not a power of 2")
-    # The progress.blocks bytes in the Transmission resume contain 1 bit per data block (where bit=1 means the block is on disk)
-    # So each byte in progress.blocks represents 8 blocks
-    # The pieces bytes in the qBittorrent resume contains a full byte per piece, where 0x01 means the piece is on disk
-    # The algorithm in this method determines if a piece is complete by extracting progress.blocks bytes in groups of n
-    # (where n=piece_size//BLOCK_SIZE//8), and checking that they are all 0xff
-    # For this to work without having to do bitwise operations, the piece size must be at least 8x the block size
-    # The block size is 16KiB so the minimum piece size is 128KiB
-    min_piece_size = 8 * BLOCK_SIZE
-    if piece_size < min_piece_size:
+    # Sanity check the piece size
+    if piece_size % BLOCK_SIZE > 0:
         raise ConversionError(
-            f"Piece size {naturalsize(min_piece_size, binary=True)} is lower than {naturalsize(min_piece_size, binary=True)}, aborting"
+            f"Piece size {piece_size} is not a multiple of {naturalsize(BLOCK_SIZE, binary=True)}, aborting"
         )
+    
+    blocks_per_piece = piece_size // BLOCK_SIZE
+    # ceiling integer division
+    num_pieces = -(-torrent_size // piece_size)
+    num_blocks = -(-torrent_size // BLOCK_SIZE)
 
     progress = get_child(resume, b"progress", dict[bytes, BencodeType])
-    blocks, _ = get_child(progress, b"blocks", bytes)
+    tr_blocks, _ = get_child(progress, b"blocks", bytes)
+
+    # Shorthand for complete torrents
+    if tr_blocks == b"all":
+        return b"\x01" * num_pieces
+    # Shorthand for empty torrents
+    if tr_blocks == b"none":
+        return b"\x00" * num_pieces
 
     # Sanity check the block bytes length
     # ceiling integer division
-    expected_num_blocks = -(-torrent_size // BLOCK_SIZE // 8)
-    if len(blocks) != expected_num_blocks:
+    expected_block_bytes = -(-num_blocks // 8)
+    if len(tr_blocks) > expected_block_bytes:
         raise ConversionError(
-            f"resume block length was expected to be {expected_num_blocks} but was {len(blocks)}"
+            f"the resume block length was expected to be {expected_block_bytes} but was {len(tr_blocks)}"
+        )
+    if len(tr_blocks) < expected_block_bytes:
+        # This happens on incomplete torrents, specifically when the last blocks are not on disk
+        # In these cases Transmission will not write the full blocks to the resume
+        # We can skip the check on all missing pieces
+        logging.warning(
+            f"incomplete torrent: the Transmission resume block has {len(tr_blocks)} bytes instead of {expected_block_bytes}, the qBittorrent pieces will be padded to size"
         )
 
-    # ceiling integer division
-    num_pieces = -(-torrent_size // piece_size)
-
     # Initialise the return object with 0s
-    qbit_pieces = bytearray(num_pieces)
-
-    blocks_per_piece = piece_size // BLOCK_SIZE
-    block_bytes_per_piece = blocks_per_piece // 8
-
-    # What a full piece looks like in progress.blocks
-    full_piece_mask = b"\xff" * block_bytes_per_piece
+    qb_pieces = bytearray(num_pieces)
 
     # Go through progress.blocks, grouping them into pieces
     for piece_index in range(num_pieces):
-        piece_start = piece_index * block_bytes_per_piece
-        piece_blocks = blocks[piece_start : piece_start + block_bytes_per_piece]
+        if is_piece_complete(tr_blocks, piece_index, blocks_per_piece, num_blocks):
+            qb_pieces[piece_index] = 0x01
 
-        # The last piece is special: if it is not exactly 128KiB then progress.blocks does not end with 0xff even when complete
-        # So we need to calculate the expected mask, then compare it to the last byte(s) of the blocks object
-        if piece_index == num_pieces - 1:
-            full_piece_mask = get_last_piece_mask_for_block_checking(
-                torrent_size, piece_size
-            )
-
-        if piece_blocks == full_piece_mask:
-            qbit_pieces[piece_index] = 1
-
-    return bytes(qbit_pieces)
+    return bytes(qb_pieces)
 
 
 def map_resume_to_qbt(
@@ -344,7 +394,7 @@ def map_resume_to_qbt(
         b"sequential_download": get_child(
             resume, b"sequentialDownload", int, default=0
         ).value,
-        b"file_priority": list(transmission_get_file_prorities(resume)),
+        b"file_priority": list(transmission_get_file_priorities(resume)),
         b"peers": transmission_get_peers(resume, 4, b"peers2"),
         b"peers6": transmission_get_peers(resume, 16, b"peers2-6"),
         b"qBt-name": name,
@@ -382,6 +432,7 @@ class Args:
     transmission_config_dir: str
     predicate: str | None
     dry_run: bool
+    log_level: int
 
 
 class TransmissionQbtImporter:
@@ -497,18 +548,17 @@ class TransmissionQbtImporter:
 
                 except ConversionError as e:
                     logging.warning(
-                        f"Error while converting resume data for {torf} : {str(e)}"
+                        f"Error while converting resume data for {torf} : {e}"
                     )
                 except OSError as e:
                     logging.warning(
                         f"Failed to read {e.filename} ({e.strerror}), skipping"
                     )
                 except ReadBencodedError as e:
-                    logging.warning(f"Failed to decode {str(e)}, skipping")
+                    logging.warning(f"Failed to decode {e}, skipping")
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     parser = argparse.ArgumentParser(
         prog="transmission2qbt",
         description="Imports all your torrents from Transmission to qBittorrent while trying to preserve as much metadata as possible",
@@ -533,8 +583,17 @@ def main() -> int:
         action="store_true",
         help="Optional flag to not write any data to disk",
     )
+    parser.add_argument(
+        "--log-level",
+        "-l",
+        type=int,
+        default=logging.INFO,
+        help="Optional flag to set log level, see https://docs.python.org/3/library/logging.html#logging-levels",
+    )
 
     args = cast(Args, parser.parse_args())
+    logging.basicConfig(level=args.log_level, format="%(levelname)s: %(message)s")
+
     try:
         TransmissionQbtImporter(args).scan()
     except QbtUsesSqliteForResumeError:

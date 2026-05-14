@@ -67,8 +67,14 @@ def get_child[T: BencodeType](
     parent: BencodeNode[dict[bytes, BencodeType]],
     child_name: bytes,
     child_type: type[T],
+) -> BencodeNode[T]: ...
+@overload
+def get_child[T: BencodeType](
+    parent: BencodeNode[dict[bytes, BencodeType]],
+    child_name: bytes,
+    child_type: type[T],
     *,
-    default: T | None = None,
+    default: T,
 ) -> BencodeNode[T]: ...
 @overload
 def get_child[T: BencodeType](

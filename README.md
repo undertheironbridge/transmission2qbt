@@ -113,14 +113,14 @@ then the location you want is `${profile_dir}/qBittorrent/data/BT_backup`.
 ## Download progress
 
 qBittorrent and Transmission have a different approach to storing information about what data is already on disk:
-* Transmission keeps track of the status of each 16KiB block (in `resume[b"progress"][b"blocks]`, which is a bitmask where each bit represents a block). The state of each piece is not explicity stored in the resume file (but is implicitly there since each piece is made of 2^n consecutive blocks).
+* Transmission keeps track of the status of each 16KiB block (in `resume[b"progress"][b"blocks]`, which is a bitmask where each bit represents a block). The state of each piece is not explicity stored in the resume file (but is implicitly there since each piece is made of consecutive blocks).
 * qBittorrent keeps track separately of:
   * Which pieces are complete (in `resume[b"pieces"]`).
   * Which blocks are complete in each incomplete piece (in `resume[b"unfinished"]`).
 With this in mind, **this script only concerns itself with complete pieces**, i.e. the `pieces` section of the qBittorrent resume file is calculated but the `unfinished` section is omitted.
 It should be possible to build it, but:
 - This would almost certainly significantly slow down the script. The pieces calculation only leverages data in the resume files, but calculating the unfinished field requires computing checksums of the actual torrent data (see the adler32 checksum in [the spec](https://github.com/steeve/libtorrent/blob/master/docs/manual.rst#fast-resume)).
-- The only effect of not calculating the field is to **discard partially downloaded pieces**. This should always be a very low amount of data for qBittorrent to download again.
+- The only effect of not calculating the field is to **discard partially downloaded pieces**. This should generally be a negligible amount of data for qBittorrent to download again.
 - As a workaround, force-rechecking all incomplete torrents once the migration is complete should recover the information (not tested).
 
 ## Incomplete files

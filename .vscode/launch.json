@@ -10,7 +10,8 @@
             "request": "launch",
             "program": "transmission2qbt.py",
             "console": "integratedTerminal",
-            "args": "${command:pickArgs}"
+            "args": "${command:pickArgs}",
+            "sudo": true
         }
     ]
 }

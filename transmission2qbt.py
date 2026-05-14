@@ -225,6 +225,48 @@ def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
             raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
 
 
+# On transmission_get_pieces & is_piece_complete
+#
+# The blocks data the in Transmission resume (tr_blocks) is a bitmask in the form of a bytes object (an immutable array of bytes, aka a
+# binary string).
+# Each byte represents 8 blocks: each bit in that byte represents a single block, i.e. a 16KiB chunk of torrent data.
+# Each bit is equal to 1 if the block is on disk, 0 if not.
+#
+# The pieces data in the qBittorrent/libtorrent resume (qb_pieces) is also a bytes object but not a bitmask: each byte represent a piece,
+# and is equal to 0x01 if the piece is on disk, 0x00 if not (only one of the 8 bits is used in each byte, the first 7 bits are always 0).
+#
+# Blocks are the atomic amount of data used for storage. Pieces are used in the hash calculation (in Bittorrent v1), the protocol, and in
+# the resume files, such as qb_pieces here.
+# There is an additional field (unfinished) in the qBittorrent resume to store block info for incomplete pieces, but this field is ignored
+# here, see README.md.
+#
+# The piece size is a multiple of the block size, but not always a multiple of 8*16KiB (the data chunk represented by a tr_blocks byte).
+# Which means that a tr_blocks byte might represent more than one qb_pieces byte, and vice versa; it also means that the first block of each
+# piece will not necessarily be aligned with the leftmost bit of a tr_blocks byte.
+#
+# So to understand which pieces are fully on disk (which is what we need to build qb_pieces), we need to extract piece_blocks for each piece
+# in tr_blocks, and check if they are all 1.
+# We start by finding what tr_block byte the piece starts and ends with. It might start midway through a byte (i.e. not the leftmost bit of
+# the start byte) and likewise it might end midway through a byte (not the rightmost bit of the end byte). For this reason the first and last
+# byte are checked using a bitwise masking operation, with a precalculated dict of masks indexed with the order of the first and last bit.
+# For instance, if the start bit order is 3, then the mask is 00011111 (0x1f). We mask the byte coming from tr_blocks against this
+# i.e. tr_blocks[piece_start] & 0x1f == 0x1f. The masks for the end bit order are reversed i.e. if the bit order is 3, the mask is
+# 11110000 (0xf0) so we will check if tr_blocks[piece_end] & 0xf0 == 0xf0.
+# All the tr_blocks bytes between the first and the last are fully part of the piece, so if the piece is complete the block bytes are all
+# 0xff. No need to mask for these, we can just compare them all to 0xff.
+#
+# There is a special case when a piece is fully contained within a block byte (which only happens when the piece length is <= 8*16KiB).
+# In this case there is only one block byte to check and we need to mask it against both the start and end mask.
+#
+# We also need to take in account that the total number of blocks might not align with the end of a piece, i.e. the last piece can be smaller.
+#
+# In another special case, tr_blocks might contain fewer bytes than expected, because Transmission does not write the end of tr_blocks when the
+# end of the torrent is not on disk (it will only write up to the last block that is on disk). For that reason when retrieving a piece we might
+# get fewer bytes than expected. In that case we need to return False since it means that the piece is not on disk.
+#
+# Finally, Transmission sets the whole tr_blocks to b"all" for complete torrents and b"none" for empty torrents, so these special cases must
+# be dealt with separately.
+
 BLOCK_SIZE = 1 << 14  # 16KiB, standard across torrents
 FIRST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF >> i for i in range(0, 8)}
 LAST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF << 7 - i & 0xFF for i in range(0, 8)}
@@ -233,46 +275,6 @@ LAST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF << 7 - i & 0xFF for i in range(0, 8)}
 def is_piece_complete(
     tr_blocks: bytes, piece_index: int, blocks_per_piece: int, num_blocks: int
 ):
-    # The blocks data the in Transmission resume (tr_blocks) is a bitmask in the form of a bytes object (an immutable array of bytes, aka a
-    # binary string).
-    # Each byte represents 8 blocks: each bit in that byte represents a single block, i.e. a 16KiB chunk of torrent data.
-    # Each bit is equal to 1 if the block is on disk, 0 if not.
-    #
-    # The pieces data in the qBittorrent/libtorrent resume (qb_pieces) is also a bytes object but not a bitmask: each byte represent a piece,
-    # and is equal to 0x01 if the piece is on disk, 0x00 if not (only one of the 8 bits is used in each byte, the first 7 bits are always 0).
-    #
-    # Blocks are the atomic amount of data used for storage. Pieces are used in the hash calculation (in Bittorrent v1), the protocol, and in
-    # the resume files, such as qb_pieces here.
-    # There is an additional field (unfinished) in the qBittorrent resume to store block info for incomplete pieces, but this field is ignored
-    # here, see README.md.
-    #
-    # The piece size is a multiple of the block size, but not always a multiple of 8*16KiB (the data chunk represented by a tr_blocks byte).
-    # Which means that a tr_blocks byte might represent more than one qb_pieces byte, and vice versa; it also means that the first block of each
-    # piece will not necessarily be aligned with the leftmost bit of a tr_blocks byte.
-    #
-    # So to understand which pieces are fully on disk (which is what we need to build qb_pieces), we need to extract piece_blocks for each piece
-    # in tr_blocks, and check if they are all 1.
-    # We start by finding what tr_block byte the piece starts and ends with. It might start midway through a byte (i.e. not the leftmost bit of
-    # the start byte) and likewise it might end midway through a byte (not the rightmost bit of the end byte). For this reason the first and last
-    # byte are checked using a bitwise masking operation, with a precalculated dict of masks indexed with the order of the first and last bit.
-    # For instance, if the start bit order is 3, then the mask is 00011111 (0x1f). We mask the byte coming from tr_blocks against this
-    # i.e. tr_blocks[piece_start] & 0x1f == 0x1f. The masks for the end bit order are reversed i.e. if the bit order is 3, the mask is
-    # 11110000 (0xf0) so we will check if tr_blocks[piece_end] & 0xf0 == 0xf0.
-    # All the tr_blocks bytes between the first and the last are fully part of the piece, so if the piece is complete the block bytes are all
-    # 0xff. No need to mask for these, we can just compare them all to 0xff.
-    #
-    # There is a special case when a piece is fully contained within a block byte (which only happens when the piece length is <= 8*16KiB).
-    # In this case there is only one block byte to check and we need to mask it against both the start and end mask.
-    #
-    # We also need to take in account that the total number of blocks might not align with the end of a piece, i.e. the last piece can be smaller.
-    #
-    # In another special case, tr_blocks might contain fewer bytes than expected, because Transmission does not write the end of tr_blocks when the
-    # end of the torrent is not on disk (it will only write up to the last block that is on disk). For that reason when retrieving a piece we might
-    # get fewer bytes than expected. In that case we need to return False since it means that the piece is not on disk.
-    #
-    # Finally, Transmission sets the whole tr_blocks to b"all" for complete torrents and b"none" for empty torrents, so these special cases must
-    # be dealt with separately.
-
     # Indexes of the first block of the piece
     # In total blocks
     piece_start_in_overall_blocks = piece_index * blocks_per_piece

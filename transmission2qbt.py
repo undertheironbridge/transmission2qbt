@@ -295,12 +295,16 @@ def is_piece_complete(
     first_byte_mask = FIRST_BYTE_MASK_BY_BIT_ORDER[piece_start_bit_order]
     last_byte_mask = LAST_BYTE_MASK_BY_BIT_ORDER[piece_end_bit_order]
     if num_piece_bytes == 1:
+        # If there is only one byte we mask as first and last byte
         byte_mask = first_byte_mask & last_byte_mask
         return piece_bytes[0] & byte_mask == byte_mask
     if piece_bytes[0] & first_byte_mask != first_byte_mask:
+        # If the piece fails the mask for the first byte
         return False
     if piece_bytes[-1] & last_byte_mask != last_byte_mask:
+        # If the piece fails the mask for the last byte
         return False
+    # Test all bytes except the first and the last (should all be 0xff)
     return piece_bytes[1:-1] == b"\xff" * (num_piece_bytes - 2)
 
 
@@ -344,13 +348,6 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     if len(tr_blocks) > expected_block_bytes:
         raise ConversionError(
             f"the resume block length was expected to be {expected_block_bytes} but was {len(tr_blocks)}"
-        )
-    if len(tr_blocks) < expected_block_bytes:
-        # This happens on incomplete torrents, specifically when the last blocks are not on disk
-        # In these cases Transmission will not write the full blocks to the resume
-        # We can skip the check on all missing pieces
-        logging.warning(
-            f"incomplete torrent: the Transmission resume block has {len(tr_blocks)} bytes instead of {expected_block_bytes}, the qBittorrent pieces will be padded to size"
         )
 
     # Initialise the return object with 0s

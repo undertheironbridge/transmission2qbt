@@ -57,18 +57,14 @@ Shut down both Transmission and qBittorrent and do :
 
 ## Predicate
 
-The `--predicate` argument accepts a Python expression that can be used for
-filtering torrents which are going to be imported to qBt. The parsed torrent
-file is named `torrent.value` and its associated Transmission resume data is
-`resume.value`. If the expression returns anything other than `True` or throws
-an exception, the torrent is skipped.
+The `--predicate` argument accepts a Python expression that can be used for filtering torrents which are going to be imported to qBt. The parsed torrent file is named `torrent` and its associated Transmission resume data is `resume`. If the expression returns anything other than `True` or throws an exception, the torrent is skipped.
+Access to data is done with helper methods get(type, key) for dicts and get(type, index) and cast(type) for lists. For more information check the BencodeList and BencodeType class documentation in the script.
 
 For example, this will only cause torrents using Debian's tracker whose name
 includes `amd64` to be imported :
 
 ```
-torrent.value[b'announce'] == b'http://bttracker.debian.org:6969/announce'
-and b'amd64' in torrent.value[b'info'][b'name']
+torrent.get(bytes, b'announce') == b'http://bttracker.debian.org:6969/announce' and b'amd64' in torrent.get(BencodeType, b'info').get(bytes, b'name')
 ```
 
 # Mappings

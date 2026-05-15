@@ -50,6 +50,10 @@ def decode(data: bytes) -> BencodeType:
 
 
 def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
+    """Wraps a bencode type.
+     dicts and lists are wrapped in BencodeList and BencodeDict respectively.
+     Scalar types (bytes & int) are typechecked and returned as is."""
+
     if t is BencodeList:
         if not isinstance(node, list):
             raise ConversionError(f"f{path} is not of type list")
@@ -64,30 +68,50 @@ def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
 
 
 class BencodeList:
+    """Wraps a bencode list. Allows retrieving items by index or enumerating them while typechecking them."""
+
     def __init__(self, node: list[BencodeType], path: str) -> None:
         self._node = node
         self._path = path
 
+    def __len__(self):
+        return len(self._node)
+
+    def get[T: BencodeWrap](self, t: type[T], index: int):
+        """Retrieve by index and typecheck"""
+
+        return wrap(t, self._node[index], f"{self._path}[{index}]")
+
     def cast[T: BencodeWrap](self, t: type[T]) -> Generator[T]:
+        """Enumerate all items while typechecking them."""
+
         for index, child_node in enumerate(self._node):
             yield wrap(t, child_node, f"{self._path}[{index}]")
 
 
 class BencodeDict:
+    """Wraps a bencode dict. Allows retrieving items by key."""
+
     def __init__(self, node: dict[bytes, BencodeType], path: str) -> None:
         self._node = node
         self._path = path
 
     @overload
-    def get[T: BencodeWrap](self, t: type[T], key: bytes) -> T: ...
+    def get[T: BencodeWrap](self, t: type[T], key: bytes) -> T:
+        """Retrieve an item by key. If the key is not present, raises ConversionError."""
+        ...
     @overload
     def get[T: BencodeWrap](
         self, t: type[T], key: bytes, *, default: BencodeType
-    ) -> T: ...
+    ) -> T:
+        """Retrieve an item by key. If the key is not present, returns the provided default."""
+        ...
     @overload
     def get[T: BencodeWrap](
         self, t: type[T], key: bytes, *, opt: Literal[True]
-    ) -> None | T: ...
+    ) -> None | T:
+        """Retrieve an item by key. If the key is not present, returns None."""
+        ...
     def get[T: BencodeWrap](
         self,
         t: type[T],
@@ -105,10 +129,12 @@ class BencodeDict:
         return wrap(t, child_node, child_path)
 
     def encode(self) -> bytes:
+        """Bencodes the wrapped data and returns the resulting string."""
         return encode(self._node)
 
     @staticmethod
     def decode(encoded: bytes, name: str) -> "BencodeDict":
+        """Decodes a bencoded string and wraps it in a new BencodeDict."""
         decoded = decode(encoded)
         return wrap(BencodeDict, decoded, name)
 

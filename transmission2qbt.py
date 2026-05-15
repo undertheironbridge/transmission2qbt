@@ -37,22 +37,26 @@ class QbtUsesSqliteForResumeError(RuntimeError):
 
 
 type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
+"""A helper alias for the types that bencode data nodes can represent."""
 
 type BencodeWrap = bytes | int | BencodeList | BencodeDict
+"""A helper alias for the wrapper types associated with bencode types."""
 
 
 def encode(data: BencodeType) -> bytes:
+    """Wraps the bencode.py encode function to avoid typechecking errors."""
     return bencodepy.encode(data)  # type: ignore
 
 
 def decode(data: bytes) -> BencodeType:
+    """Wraps the bencode.py decode function to avoid typechecking errors."""
     return bencodepy.decode(data)  # type: ignore
 
 
 def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
     """Wraps a bencode type.
-     dicts and lists are wrapped in BencodeList and BencodeDict respectively.
-     Scalar types (bytes & int) are typechecked and returned as is."""
+    dicts and lists are typechecked and wrapped in BencodeList and BencodeDict respectively.
+    Scalar types (bytes & int) are typechecked and returned as is."""
 
     if t is BencodeList:
         if not isinstance(node, list):
@@ -100,30 +104,31 @@ class BencodeDict:
     def get[T: BencodeWrap](self, t: type[T], key: bytes) -> T:
         """Retrieve an item by key. If the key is not present, raises ConversionError."""
         ...
+
     @overload
-    def get[T: BencodeWrap](
-        self, t: type[T], key: bytes, *, default: BencodeType
-    ) -> T:
+    def get[T: BencodeWrap](self, t: type[T], key: bytes, *, default: BencodeType) -> T:
         """Retrieve an item by key. If the key is not present, returns the provided default."""
         ...
+
     @overload
     def get[T: BencodeWrap](
-        self, t: type[T], key: bytes, *, opt: Literal[True]
+        self, t: type[T], key: bytes, *, optional: Literal[True]
     ) -> None | T:
         """Retrieve an item by key. If the key is not present, returns None."""
         ...
+
     def get[T: BencodeWrap](
         self,
         t: type[T],
         key: bytes,
         *,
         default: BencodeType | None = None,
-        opt: bool = False,
+        optional: bool = False,
     ) -> None | T:
         child_node = self._node.get(key, default)
         child_path = f"{self._path}.{key.decode()}"
         if child_node is None:
-            if opt:
+            if optional:
                 return None
             raise ConversionError(f"{child_path} is missing")
         return wrap(t, child_node, child_path)
@@ -169,8 +174,8 @@ def transmission_get_speed_limit(resume: BencodeDict, key: bytes) -> int:
 
 
 def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
-    priority = resume.get(BencodeList, b"priority", opt=True)
-    dnd = resume.get(BencodeList, b"dnd", opt=True)
+    priority = resume.get(BencodeList, b"priority", optional=True)
+    dnd = resume.get(BencodeList, b"dnd", optional=True)
 
     # Return empty list if priority data is not available
     if priority is None or dnd is None:
@@ -194,7 +199,7 @@ def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
 def peers_convert_from_raw_bytes(
     resume: BencodeDict, key: bytes, addr_size: int
 ) -> bytes:
-    peers = resume.get(bytes, key, opt=True)
+    peers = resume.get(bytes, key, optional=True)
     if peers is None:
         return b""
 
@@ -211,7 +216,7 @@ def peers_convert_from_raw_bytes(
 
 
 def peers_convert_from_bencoded(resume: BencodeDict, key: bytes) -> bytes:
-    peers = resume.get(BencodeList, key, opt=True)
+    peers = resume.get(BencodeList, key, optional=True)
     if peers is None:
         return b""
     return b"".join(d.get(bytes, b"socket_address") for d in peers.cast(BencodeDict))
@@ -337,7 +342,7 @@ def is_piece_complete(
 
 def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     torrent_info = torrent.get(BencodeDict, b"info")
-    torrent_size = torrent_info.get(int, b"length", opt=True) or sum(
+    torrent_size = torrent_info.get(int, b"length", optional=True) or sum(
         file.get(int, b"length")
         for file in torrent_info.get(BencodeList, b"files").cast(BencodeDict)
     )
@@ -385,13 +390,13 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
 def transmission_get_files(
     torrent_info: BencodeDict, resume: BencodeDict
 ) -> None | list[BencodeType]:
-    resume_files = resume.get(BencodeList, b"files", opt=True)
+    resume_files = resume.get(BencodeList, b"files", optional=True)
     if resume_files is None:
         return None
     actual_files: list[BencodeType] = list(resume_files.cast(bytes))
 
     torrent_name = torrent_info.get(bytes, b"name")
-    torrent_files = torrent_info.get(BencodeList, b"files", opt=True)
+    torrent_files = torrent_info.get(BencodeList, b"files", optional=True)
     if torrent_files is None:
         # Single-file torrent
         expected_files = [torrent_name]
@@ -450,11 +455,11 @@ def map_resume_to_qbt(
         qbt_resume_data[b"peers"] = transmission_get_peers(resume, b"peers2", 4)
         qbt_resume_data[b"peers6"] = transmission_get_peers(resume, b"peers2-6", 16)
 
-    group = resume.get(bytes, b"group", opt=True)
+    group = resume.get(bytes, b"group", optional=True)
     if group is not None:
         qbt_resume_data[b"qBt-category"] = group
 
-    labels = resume.get(BencodeList, b"labels", opt=True)
+    labels = resume.get(BencodeList, b"labels", optional=True)
     if labels is not None:
         qbt_resume_data[b"qBt-tags"] = list(labels.cast(bytes))
 
@@ -469,7 +474,7 @@ def map_resume_to_qbt(
     if files is not None:
         qbt_resume_data[b"mapped_files"] = files
 
-    incomplete_dir = resume.get(bytes, b"incomplete_dir", opt=True)
+    incomplete_dir = resume.get(bytes, b"incomplete_dir", optional=True)
     if incomplete_dir is not None:
         qbt_resume_data[b"qBt-downloadPath"] = incomplete_dir
 

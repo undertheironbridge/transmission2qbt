@@ -134,7 +134,7 @@ class BencodeDict:
         return wrap(t, child_node, child_path)
 
     def encode(self) -> bytes:
-        """Bencodes the wrapped data and returns the resulting string."""
+        """Unwraps the data and returns it as a bencoded string."""
         return encode(self._node)
 
     @staticmethod

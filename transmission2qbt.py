@@ -81,59 +81,51 @@ class BencodeDict:
         self._path = path
 
     @overload
-    def get[T: bytes | int](self, t: type[T], child_name: bytes) -> T: ...
+    def get[T: bytes | int](self, t: type[T], key: bytes) -> T: ...
+    @overload
+    def get[T: bytes | int](self, t: type[T], key: bytes, *, default: T) -> T: ...
     @overload
     def get[T: bytes | int](
-        self, t: type[T], child_name: bytes, *, default: T
-    ) -> T: ...
-    @overload
-    def get[T: bytes | int](
-        self, t: type[T], child_name: bytes, *, optional: Literal[True]
+        self, t: type[T], key: bytes, *, opt: Literal[True]
     ) -> None | T: ...
     def get[T: bytes | int](
         self,
         t: type[T],
-        child_name: bytes,
+        key: bytes,
         *,
         default: T | None = None,
-        optional: bool = False,
+        opt: bool = False,
     ) -> None | T:
-        child = self._get_child(child_name, default, optional)
+        child = self._get_child(key, default, opt)
         if child is None:
             return None
         return convert(t, *child)
 
     @overload
-    def get_list(self, child_name: bytes) -> BencodeList: ...
+    def get_list(self, key: bytes) -> BencodeList: ...
     @overload
-    def get_list(
-        self, child_name: bytes, *, optional: Literal[True]
-    ) -> None | BencodeList: ...
-    def get_list(
-        self, child_name: bytes, *, optional: bool = False
-    ) -> None | BencodeList:
-        child = self._get_child(child_name, None, optional)
+    def get_list(self, key: bytes, *, opt: Literal[True]) -> None | BencodeList: ...
+    def get_list(self, key: bytes, *, opt: bool = False) -> None | BencodeList:
+        child = self._get_child(key, None, opt)
         if child is None:
             return None
         return BencodeList(*child)
 
     @overload
-    def get_dict(self, name: bytes) -> "BencodeDict": ...
+    def get_dict(self, key: bytes) -> "BencodeDict": ...
     @overload
-    def get_dict(
-        self, name: bytes, *, optional: Literal[True]
-    ) -> "None | BencodeDict": ...
-    def get_dict(self, name: bytes, *, optional: bool = False) -> "None | BencodeDict":
-        child = self._get_child(name, None, optional)
+    def get_dict(self, key: bytes, *, opt: Literal[True]) -> "None | BencodeDict": ...
+    def get_dict(self, key: bytes, *, opt: bool = False) -> "None | BencodeDict":
+        child = self._get_child(key, None, opt)
         if child is None:
             return None
         return BencodeDict(*child)
 
-    def _get_child(self, name: bytes, default: BencodeType | None, optional: bool):
-        child_node = self._node.get(name, default)
-        child_path = f"{self._path}.{name.decode()}"
+    def _get_child(self, key: bytes, default: BencodeType | None, opt: bool):
+        child_node = self._node.get(key, default)
+        child_path = f"{self._path}.{key.decode()}"
         if child_node is None:
-            if optional:
+            if opt:
                 return None
             raise ConversionError(f"{child_path} is missing")
         return child_node, child_path
@@ -177,8 +169,8 @@ def transmission_get_speed_limit(resume: BencodeDict, key: bytes) -> int:
 
 
 def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
-    priority = resume.get_list(b"priority", optional=True)
-    dnd = resume.get_list(b"dnd", optional=True)
+    priority = resume.get_list(b"priority", opt=True)
+    dnd = resume.get_list(b"dnd", opt=True)
 
     # Return empty list if priority data is not available
     if priority is None or dnd is None:
@@ -202,7 +194,7 @@ def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
 def peers_convert_from_raw_bytes(
     resume: BencodeDict, key: bytes, addr_size: int
 ) -> bytes:
-    peers = resume.get(bytes, key, optional=True)
+    peers = resume.get(bytes, key, opt=True)
     if peers is None:
         return b""
 
@@ -219,7 +211,7 @@ def peers_convert_from_raw_bytes(
 
 
 def peers_convert_from_bencoded(resume: BencodeDict, key: bytes) -> bytes:
-    peers = resume.get_list(key, optional=True)
+    peers = resume.get_list(key, opt=True)
     if peers is None:
         return b""
     return b"".join(d.get(bytes, b"socket_address") for d in peers.get_dicts())
@@ -345,7 +337,7 @@ def is_piece_complete(
 
 def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     torrent_info = torrent.get_dict(b"info")
-    torrent_size = torrent_info.get(int, b"length", optional=True) or sum(
+    torrent_size = torrent_info.get(int, b"length", opt=True) or sum(
         file.get(int, b"length") for file in torrent_info.get_list(b"files").get_dicts()
     )
     piece_size = torrent_info.get(int, b"piece length")
@@ -392,13 +384,13 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
 def transmission_get_files(
     torrent_info: BencodeDict, resume: BencodeDict
 ) -> None | list[BencodeType]:
-    resume_files = resume.get_list(b"files", optional=True)
+    resume_files = resume.get_list(b"files", opt=True)
     if resume_files is None:
         return None
     actual_files: list[BencodeType] = list(resume_files.get(bytes))
 
     torrent_name = torrent_info.get(bytes, b"name")
-    torrent_files = torrent_info.get_list(b"files", optional=True)
+    torrent_files = torrent_info.get_list(b"files", opt=True)
     if torrent_files is None:
         # Single-file torrent
         expected_files = [torrent_name]
@@ -457,11 +449,11 @@ def map_resume_to_qbt(
         qbt_resume_data[b"peers"] = transmission_get_peers(resume, b"peers2", 4)
         qbt_resume_data[b"peers6"] = transmission_get_peers(resume, b"peers2-6", 16)
 
-    group = resume.get(bytes, b"group", optional=True)
+    group = resume.get(bytes, b"group", opt=True)
     if group is not None:
         qbt_resume_data[b"qBt-category"] = group
 
-    labels = resume.get_list(b"labels", optional=True)
+    labels = resume.get_list(b"labels", opt=True)
     if labels is not None:
         qbt_resume_data[b"qBt-tags"] = list(labels.get(bytes))
 
@@ -476,7 +468,7 @@ def map_resume_to_qbt(
     if files is not None:
         qbt_resume_data[b"mapped_files"] = files
 
-    incomplete_dir = resume.get(bytes, b"incomplete_dir", optional=True)
+    incomplete_dir = resume.get(bytes, b"incomplete_dir", opt=True)
     if incomplete_dir is not None:
         qbt_resume_data[b"qBt-downloadPath"] = incomplete_dir
 

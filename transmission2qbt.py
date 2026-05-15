@@ -94,7 +94,7 @@ class BencodeList:
 
 
 class BencodeDict:
-    """Wraps a bencode dict. Allows retrieving items by key."""
+    """Wraps a bencode dict. Allows retrieving items by key while typechecking them."""
 
     def __init__(self, node: dict[bytes, BencodeType], path: str) -> None:
         self._node = node
@@ -102,19 +102,19 @@ class BencodeDict:
 
     @overload
     def get[T: BencodeWrap](self, t: type[T], key: bytes) -> T:
-        """Retrieve an item by key. If the key is not present, raises ConversionError."""
+        """Retrieves an item by key and typechecks it. If the key is not present, raises ConversionError."""
         ...
 
     @overload
     def get[T: BencodeWrap](self, t: type[T], key: bytes, *, default: BencodeType) -> T:
-        """Retrieve an item by key. If the key is not present, returns the provided default."""
+        """Retrieve an item by key and typechecks it. If the key is not present, returns the provided default."""
         ...
 
     @overload
     def get[T: BencodeWrap](
         self, t: type[T], key: bytes, *, optional: Literal[True]
     ) -> None | T:
-        """Retrieve an item by key. If the key is not present, returns None."""
+        """Retrieve an item by key and typechecks it. If the key is not present, returns None."""
         ...
 
     def get[T: BencodeWrap](

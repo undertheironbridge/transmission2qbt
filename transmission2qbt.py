@@ -210,8 +210,8 @@ def transmission_get_peers(resume: BencodeDict, key: bytes, addr_size: int) -> b
 
     if isinstance(src, bytes):
         return peers_convert_from_raw_bytes(src, addr_size)
-
-    return peers_convert_from_bencoded(resume, key)
+    else:
+        return peers_convert_from_bencoded(resume, key)
 
 
 def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:

@@ -342,7 +342,7 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     expected_block_bytes = -(-num_blocks // 8)
     if len(tr_blocks) > expected_block_bytes:
         raise ConversionError(
-            f"the resume block length was expected to be {expected_block_bytes} but was {len(tr_blocks)}"
+            f"The resume block length was expected to be {expected_block_bytes} but was {len(tr_blocks)}"
         )
 
     # Initialise the return object with 0s

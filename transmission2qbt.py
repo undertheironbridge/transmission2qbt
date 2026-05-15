@@ -387,46 +387,19 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     return bytes(qb_pieces)
 
 
-def transmission_get_files(
-    torrent_info: BencodeDict, resume: BencodeDict
-) -> None | list[BencodeType]:
-    resume_files = resume.get(BencodeList, b"files", optional=True)
-    if resume_files is None:
-        return None
-    actual_files: list[BencodeType] = list(resume_files.cast(bytes))
-
-    torrent_name = torrent_info.get(bytes, b"name")
-    torrent_files = torrent_info.get(BencodeList, b"files", optional=True)
-    if torrent_files is None:
-        # Single-file torrent
-        expected_files = [torrent_name]
-    else:
-        # Multi-file torrent
-        expected_files = [
-            torrent_name + b"/".join(torrent_file.get(BencodeList, b"path").cast(bytes))
-            for torrent_file in torrent_files.cast(BencodeDict)
-        ]
-
-    if actual_files == expected_files:
-        # mapped_files is not present if no file is renamed
-        return None
-
-    return actual_files
-
-
 def map_resume_to_qbt(
     info_hash: str, torrent: BencodeDict, resume: BencodeDict
 ) -> dict[bytes, BencodeType]:
     downloading_time_seconds = resume.get(int, b"downloading-time-seconds")
     seeding_time_seconds = resume.get(int, b"seeding-time-seconds")
-    resume_name = resume.get(bytes, b"name")
+    name = resume.get(bytes, b"name")
     paused = resume.get(int, b"paused")
 
     qbt_resume_data: BencodeType = {
         b"file-format": b"libtorrent resume file",
         b"file-version": 1,
         b"info-hash": binascii.unhexlify(info_hash),
-        b"name": resume_name,
+        b"name": name,
         b"total_uploaded": resume.get(int, b"uploaded"),
         b"total_downloaded": resume.get(int, b"downloaded"),
         b"added_time": resume.get(int, b"added-date"),
@@ -443,6 +416,7 @@ def map_resume_to_qbt(
         b"paused": paused,
         b"sequential_download": resume.get(int, b"sequentialDownload", default=0),
         b"file_priority": list(transmission_get_file_priorities(resume)),
+        b"qBt-name": name,
         b"qBt-ratioLimit": transmission_get_limit(resume, "ratio"),
         b"qBt-inactiveSeedingTimeLimit": int(transmission_get_limit(resume, "idle")),
         b"qBt-savePath": resume.get(bytes, b"destination"),
@@ -463,16 +437,9 @@ def map_resume_to_qbt(
     if labels is not None:
         qbt_resume_data[b"qBt-tags"] = list(labels.cast(bytes))
 
-    # qBt-name is present but empty when the torrent is not renamed
-    torrent_name = torrent_info.get(bytes, b"name")
-    if resume_name == torrent_name:
-        qbt_resume_data[b"qBt-name"] = b""
-    else:
-        qbt_resume_data[b"qBt-name"] = resume_name
-
-    files = transmission_get_files(torrent_info, resume)
+    files = resume.get(BencodeList, b"files", optional=True)
     if files is not None:
-        qbt_resume_data[b"mapped_files"] = files
+        qbt_resume_data[b"mapped_files"] = list(files.cast(bytes))
 
     incomplete_dir = resume.get(bytes, b"incomplete_dir", optional=True)
     if incomplete_dir is not None:

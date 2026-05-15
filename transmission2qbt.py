@@ -51,8 +51,12 @@ def decode(data: bytes) -> BencodeType:
 
 def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
     if t is BencodeList:
+        if not isinstance(node, list):
+            raise ConversionError(f"f{path} is not of type list")
         return cast(T, BencodeList(node, path))
     if t is BencodeDict:
+        if not isinstance(node, dict):
+            raise ConversionError(f"f{path} is not of type dict")
         return cast(T, BencodeDict(node, path))
     if not isinstance(node, t):
         raise ConversionError(f"{path} is not of type {T}")
@@ -60,9 +64,7 @@ def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
 
 
 class BencodeList:
-    def __init__(self, node: BencodeType, path: str) -> None:
-        if not isinstance(node, list):
-            raise ConversionError(f"f{path} is not of type list")
+    def __init__(self, node: list[BencodeType], path: str) -> None:
         self._node = node
         self._path = path
 
@@ -72,9 +74,7 @@ class BencodeList:
 
 
 class BencodeDict:
-    def __init__(self, node: BencodeType, path: str) -> None:
-        if not isinstance(node, dict):
-            raise ConversionError(f"f{path} is not of type dict")
+    def __init__(self, node: dict[bytes, BencodeType], path: str) -> None:
         self._node = node
         self._path = path
 
@@ -108,9 +108,9 @@ class BencodeDict:
         return encode(self._node)
 
     @staticmethod
-    def decode(encoded: bytes, name: str):
+    def decode(encoded: bytes, name: str) -> "BencodeDict":
         decoded = decode(encoded)
-        return BencodeDict(decoded, name)
+        return wrap(BencodeDict, decoded, name)
 
 
 def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str) -> None:

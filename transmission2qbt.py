@@ -287,8 +287,8 @@ def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
 # be dealt with separately.
 
 BLOCK_SIZE = 1 << 14  # 16KiB, standard across torrents
-FIRST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF >> i for i in range(0, 8)}
-LAST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF << 7 - i & 0xFF for i in range(0, 8)}
+FIRST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF >> i for i in range(8)}
+LAST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF << 7 - i & 0xFF for i in range(8)}
 
 
 def is_piece_complete(

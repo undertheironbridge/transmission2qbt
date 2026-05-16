@@ -37,25 +37,25 @@ class QbtUsesSqliteForResumeError(RuntimeError):
 
 
 type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
-"""A helper alias for the types that bencode data nodes can represent."""
+"""A helper alias for the types that bencode data nodes can be represented as."""
 
 type BencodeWrap = bytes | int | BencodeList | BencodeDict
 """A helper alias for the wrapper types associated with bencode types."""
 
 
 def encode(data: BencodeType) -> bytes:
-    """Wraps the bencode.py encode function to avoid typechecking errors."""
+    """Wraps the bencode.py encode function to avoid code analysis errors."""
     return bencodepy.encode(data)  # type: ignore
 
 
 def decode(data: bytes) -> BencodeType:
-    """Wraps the bencode.py decode function to avoid typechecking errors."""
+    """Wraps the bencode.py decode function to avoid code analysis errors."""
     return bencodepy.decode(data)  # type: ignore
 
 
 def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
     """Wraps a bencode type.
-    dicts and lists are typechecked and wrapped in BencodeList and BencodeDict respectively.
+    dicts & lists are typechecked and wrapped in BencodeList and BencodeDict respectively.
     Scalar types (bytes & int) are typechecked and returned as is."""
 
     if t is BencodeList:
@@ -81,8 +81,8 @@ class BencodeList:
     def __len__(self):
         return len(self._node)
 
-    def get[T: BencodeWrap](self, t: type[T], index: int):
-        """Retrieve by index and typecheck"""
+    def get[T: BencodeWrap](self, t: type[T], index: int) -> T:
+        """Retrieve by index and typecheck."""
 
         return wrap(t, self._node[index], f"{self._path}[{index}]")
 
@@ -173,19 +173,40 @@ def transmission_get_speed_limit(resume: BencodeDict, key: bytes) -> int:
     return -1
 
 
-def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
-    priority = resume.get(BencodeList, b"priority", optional=True)
-    dnd = resume.get(BencodeList, b"dnd", optional=True)
+def transmission_get_file_priorities(
+    torrent_info: BencodeDict, resume: BencodeDict
+) -> Generator[int]:
+    priorities = resume.get(BencodeList, b"priority", optional=True)
+    dnds = resume.get(BencodeList, b"dnd", optional=True)
 
     # Return empty list if priority data is not available
-    if priority is None or dnd is None:
+    if priorities is None or dnds is None:
         return
 
-    for i, (p, d) in enumerate(zip(priority.cast(int), dnd.cast(int), strict=True)):
-        if d == 1:
+    if len(priorities) != len(dnds):
+        raise ConversionError(
+            f"priority and dnd lengths are not equal : {len(priorities)} != {len(dnds)}"
+        )
+
+    files = torrent_info.get(BencodeList, b"files", optional=True)
+    if files is None:
+        file_sizes = [torrent_info.get(int, b"length")]
+    else:
+        file_sizes = [file.get(int, b"length") for file in files.cast(BencodeDict)]
+
+    index = 0
+    for file_size in file_sizes:
+        if file_size == 0:
+            # Transmission ignores 0-sized files entirely including when building the priority & dnd lists,
+            # but qBittorrent does not. This creates a mismatch in the index between the two resume files,
+            # meaning we have to explicitly return an extra item here, while NOT incrementing the index.
+            yield 4  # libtorrent::default_priority
+            continue
+        if dnds.get(int, index) == 1:
             yield 0  # libtorrent::dont_download
         else:
-            match p:
+            priority = priorities.get(int, index)
+            match priority:
                 case -1:  # TR_PRI_LOW
                     yield 1  # libtorrent::low_priority
                 case 0:  # TR_PRI_NORMAL
@@ -193,7 +214,8 @@ def transmission_get_file_priorities(resume: BencodeDict) -> Generator[int]:
                 case 1:  # TR_PRI_HIGH
                     yield 7  # libtorrent::top_priority
                 case _:
-                    raise ConversionError(f"Unknown priority[{i}]: {p}")
+                    raise ConversionError(f"Unknown priority[{index}]: {priority}")
+        index += 1
 
 
 def peers_convert_from_raw_bytes(
@@ -387,9 +409,46 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
     return bytes(qb_pieces)
 
 
+def transmission_get_files(
+    torrent_info: BencodeDict, resume: BencodeDict
+) -> None | list[BencodeType]:
+    # Files as defined in the torrent
+    tor_files = torrent_info.get(BencodeList, b"files", optional=True)
+
+    # Files as defined in the Transmission resume
+    tr_name = resume.get(bytes, b"name")
+    tr_files = resume.get(BencodeList, b"files", optional=True)
+
+    if tor_files is None or tr_files is None:
+        # Single-file torrent
+        return None
+
+    # Files as defined in the qBittorrent resume
+    qbit_files = list[BencodeType]()
+
+    tr_index = 0
+    for tor_file in tor_files.cast(BencodeDict):
+        file_size = tor_file.get(int, b"length")
+        if file_size == 0:
+            # Transmission ignores 0-sized files entirely including when building the file list, but
+            # qBittorrent does not. This creates a mismatch in the index between the two resume files,
+            # meaning we have to explicitly return an extra item here, while NOT incrementing the index.
+            qbit_files.append(
+                tr_name
+                + b"/"
+                + b"/".join(tor_file.get(BencodeList, b"path").cast(bytes))
+            )
+        else:
+            qbit_files.append(tr_files.get(bytes, tr_index))
+            tr_index += 1
+
+    return qbit_files
+
+
 def map_resume_to_qbt(
     info_hash: str, torrent: BencodeDict, resume: BencodeDict, add_paused: bool
 ) -> dict[bytes, BencodeType]:
+    torrent_info = torrent.get(BencodeDict, b"info")
     downloading_time_seconds = resume.get(int, b"downloading-time-seconds")
     seeding_time_seconds = resume.get(int, b"seeding-time-seconds")
     name = resume.get(bytes, b"name")
@@ -415,15 +474,13 @@ def map_resume_to_qbt(
         b"save_path": resume.get(bytes, b"destination"),
         b"paused": paused,
         b"sequential_download": resume.get(int, b"sequentialDownload", default=0),
-        b"file_priority": list(transmission_get_file_priorities(resume)),
+        b"file_priority": list(transmission_get_file_priorities(torrent_info, resume)),
         b"qBt-name": name,
         b"qBt-ratioLimit": transmission_get_limit(resume, "ratio"),
         b"qBt-inactiveSeedingTimeLimit": int(transmission_get_limit(resume, "idle")),
         b"qBt-savePath": resume.get(bytes, b"destination"),
         b"pieces": transmission_get_pieces(torrent, resume),
     }
-
-    torrent_info = torrent.get(BencodeDict, b"info")
 
     if not torrent_info.get(int, b"private", default=0):
         qbt_resume_data[b"peers"] = transmission_get_peers(resume, b"peers2", 4)
@@ -437,9 +494,9 @@ def map_resume_to_qbt(
     if labels is not None:
         qbt_resume_data[b"qBt-tags"] = list(labels.cast(bytes))
 
-    files = resume.get(BencodeList, b"files", optional=True)
+    files = transmission_get_files(torrent_info, resume)
     if files is not None:
-        qbt_resume_data[b"mapped_files"] = list(files.cast(bytes))
+        qbt_resume_data[b"mapped_files"] = files
 
     incomplete_dir = resume.get(bytes, b"incomplete_dir", optional=True)
     if incomplete_dir is not None:

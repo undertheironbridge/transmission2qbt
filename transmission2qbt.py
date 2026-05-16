@@ -179,7 +179,7 @@ def transmission_get_file_priorities(
     priorities = resume.get(BencodeList, b"priority", optional=True)
     dnds = resume.get(BencodeList, b"dnd", optional=True)
 
-    # Return empty list if priority data is not available
+    # Return empty generator if priority data is not available
     if priorities is None or dnds is None:
         return
 

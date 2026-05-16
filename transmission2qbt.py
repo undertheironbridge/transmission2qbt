@@ -388,12 +388,12 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
 
 
 def map_resume_to_qbt(
-    info_hash: str, torrent: BencodeDict, resume: BencodeDict
+    info_hash: str, torrent: BencodeDict, resume: BencodeDict, add_paused: bool
 ) -> dict[bytes, BencodeType]:
     downloading_time_seconds = resume.get(int, b"downloading-time-seconds")
     seeding_time_seconds = resume.get(int, b"seeding-time-seconds")
     name = resume.get(bytes, b"name")
-    paused = resume.get(int, b"paused")
+    paused = add_paused or resume.get(int, b"paused")
 
     qbt_resume_data: BencodeType = {
         b"file-format": b"libtorrent resume file",
@@ -455,7 +455,8 @@ def map_resume_to_qbt(
 class Args:
     qbt_bt_backup_dir: str
     transmission_config_dir: str
-    predicate: str | None
+    filter: str | None
+    add_paused: bool
     dry_run: bool
     log_level: int
 
@@ -468,7 +469,8 @@ class TransmissionQbtImporter:
         )
         self._source_resume_dir = os.path.join(args.transmission_config_dir, "resume")
         self._target_dir = args.qbt_bt_backup_dir
-        self._predicate = args.predicate
+        self._filter = args.filter
+        self._add_paused = args.add_paused
         self._dry_run = args.dry_run
         self._torrent_file_300_rgx = re.compile("([0-9a-f]{40})\\.torrent")
         self._torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
@@ -480,7 +482,9 @@ class TransmissionQbtImporter:
         torrent: BencodeDict,
         resume: BencodeDict,
     ) -> None:
-        qbt_resume_data = map_resume_to_qbt(info_hash, torrent, resume)
+        qbt_resume_data = map_resume_to_qbt(
+            info_hash, torrent, resume, self._add_paused
+        )
         qbt_resume_enc = encode(qbt_resume_data)
         qbt_resume_path = os.path.join(self._target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self._target_dir, info_hash + ".torrent")
@@ -520,11 +524,11 @@ class TransmissionQbtImporter:
         if info_hash is None:
             info_hash = calc_info_hash(torrent)
 
-        if self._predicate is None:
+        if self._filter is None:
             predicate_rv = True
         else:
             try:
-                predicate_rv = eval(self._predicate)
+                predicate_rv = eval(self._filter)
             except Exception as e:
                 logging.info(
                     f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
@@ -534,7 +538,7 @@ class TransmissionQbtImporter:
         if predicate_rv:
             self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
         else:
-            logging.info(
+            logging.debug(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
             )
 
@@ -595,9 +599,15 @@ def main() -> int:
         help="The BT_backup directory inside target qBittorrent instance's data directory",
     )
     parser.add_argument(
-        "--predicate",
-        "-p",
+        "--filter",
+        "-f",
         help="A Python expression for filtering source torrents",
+    )
+    parser.add_argument(
+        "--add-paused",
+        "-p",
+        action="store_true",
+        help="Optional flag to add all torrents paused rather than using the resume status",
     )
     parser.add_argument(
         "--dry-run",

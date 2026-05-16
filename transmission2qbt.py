@@ -419,20 +419,20 @@ def transmission_get_files(
     # (multi-file torrents).
     tr_name = resume.get(bytes, b"name")
 
-    # Files as defined in the torrent
+    # Files as defined in the torrent.
     tor_files = torrent_info.get(BencodeList, b"files", optional=True)
     if tor_files is None:
-        # Single-file torrent, return the resume name,
+        # Single-file torrent, return the resume name.
         return [tr_name]
 
-    # Files as defined in the Transmission resume
+    # Files as defined in the Transmission resume.
     tr_files = resume.get(BencodeList, b"files", optional=True)
     if tr_files is None:
-        # If we do not have access to this data, None is valid for qBittorrent as it will use the
-        # default names (the ones defined in the torrent)
+        # If we do not have access to this data, None is a valid value for qBittorrent as it will
+        # use the default names (the ones defined in the torrent).
         return None
 
-    # Files as defined in the qBittorrent resume (what we are calculating)
+    # Files as defined in the qBittorrent resume (what we are calculating).
     qbit_files = list[BencodeType]()
 
     tr_index = 0

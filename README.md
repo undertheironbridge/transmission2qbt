@@ -47,6 +47,8 @@ for the *Resume data storage type (requires restart)* setting should be
 script so qBittorrent can export any existing data from SQLite and switches to
 Fastresume before starting the migration from Transmission.
 
+Python 3.12 or over must be installed in the environment where the script is run.
+
 ## Invocation
 
 From the root of the folder

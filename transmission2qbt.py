@@ -107,14 +107,14 @@ class BencodeDict:
 
     @overload
     def get[T: BencodeWrap](self, t: type[T], key: bytes, *, default: BencodeType) -> T:
-        """Retrieve an item by key and typechecks it. If the key is not present, returns the provided default."""
+        """Retrieves an item by key and typechecks it. If the key is not present, returns the provided default."""
         ...
 
     @overload
     def get[T: BencodeWrap](
         self, t: type[T], key: bytes, *, optional: Literal[True]
     ) -> None | T:
-        """Retrieve an item by key and typechecks it. If the key is not present, returns None."""
+        """Retrieves an item by key and typechecks it. If the key is not present, returns None."""
         ...
 
     def get[T: BencodeWrap](
@@ -302,7 +302,7 @@ def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
 # All the tr_blocks bytes between the first and the last are fully part of the piece, so if the piece is complete the block bytes are all
 # 0xff. No need to mask for these, we can just compare them all to 0xff.
 #
-# There is a special case when a piece is fully contained within a block byte (which only happens when the piece length is <= 8*16KiB).
+# There is a special case when a piece is fully contained within a block byte (which only happens when the piece size is <= 8*16KiB).
 # In this case there is only one block byte to check and we need to mask it against both the start and end mask.
 #
 # We also need to take in account that the total number of blocks might not align with the end of a piece, i.e. the last piece can be smaller.
@@ -327,7 +327,7 @@ def is_piece_complete(
     piece_start_in_overall_blocks = piece_index * blocks_per_piece
     # In tr_blocks
     piece_start_in_block_bytes = piece_start_in_overall_blocks // 8
-    # in the specific tr_blocks byte
+    # In the specific tr_blocks byte
     piece_start_bit_order = piece_start_in_overall_blocks % 8
 
     # Indexes of the last block of the piece
@@ -337,7 +337,7 @@ def is_piece_complete(
     )
     # In tr_blocks
     piece_end_in_block_bytes = piece_end_in_overall_blocks // 8
-    # in the specific tr_blocks byte
+    # In the specific tr_blocks byte
     piece_end_bit_order = piece_end_in_overall_blocks % 8
 
     num_piece_bytes = piece_end_in_block_bytes - piece_start_in_block_bytes + 1
@@ -413,18 +413,26 @@ def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
 def transmission_get_files(
     torrent_info: BencodeDict, resume: BencodeDict
 ) -> None | list[BencodeType]:
+    # When adding a torrent to Transmission, the resume name is initially set to the same as
+    # the name defined in the torrent. It diverges when renaming the torrent inside Transmission.
+    # This action also renames the file (for single-file torrents) or top-level directory
+    # (multi-file torrents).
+    tr_name = resume.get(bytes, b"name")
+
     # Files as defined in the torrent
     tor_files = torrent_info.get(BencodeList, b"files", optional=True)
+    if tor_files is None:
+        # Single-file torrent, return the resume name,
+        return [tr_name]
 
     # Files as defined in the Transmission resume
-    tr_name = resume.get(bytes, b"name")
     tr_files = resume.get(BencodeList, b"files", optional=True)
-
-    if tor_files is None or tr_files is None:
-        # Single-file torrent
+    if tr_files is None:
+        # If we do not have access to this data, None is valid for qBittorrent as it will use the
+        # default names (the ones defined in the torrent)
         return None
 
-    # Files as defined in the qBittorrent resume
+    # Files as defined in the qBittorrent resume (what we are calculating)
     qbit_files = list[BencodeType]()
 
     tr_index = 0

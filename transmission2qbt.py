@@ -555,10 +555,10 @@ class TransmissionQbtImporter:
         qbt_resume_path = os.path.join(self._target_dir, info_hash + ".fastresume")
         qbt_torrent_path = os.path.join(self._target_dir, info_hash + ".torrent")
         if self._dry_run:
-            logging.info(
+            logging.debug(
                 f"dry run: would save {naturalsize(len(qbt_resume_enc), binary=True)} to {qbt_resume_path}"
             )
-            logging.info(
+            logging.debug(
                 f"dry run: would copy {source_tor_abs_path} to {qbt_torrent_path}"
             )
         else:
@@ -566,23 +566,24 @@ class TransmissionQbtImporter:
                 with open(qbt_resume_path, "wb") as resumf:
                     resumf.write(qbt_resume_enc)
                 shutil.copy(source_tor_abs_path, qbt_torrent_path)
-                logging.info(
+                logging.debug(
                     f"Successfully imported {os.path.basename(source_tor_abs_path)} ({info_hash})"
                 )
 
-            except:
-                logging.warning(
-                    f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {self._target_dir}"
-                )
+            except Exception as e:
                 rm_f(qbt_resume_path)
                 rm_f(qbt_torrent_path)
+                raise ConversionError(
+                    f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {self._target_dir}",
+                    e,
+                )
 
     def copy_if_wanted(
         self,
         source_tor_abs_path: str,
         source_res_abs_path: str,
         info_hash: str | None,
-    ) -> None:
+    ) -> bool:
         torrent = read_bencoded(source_tor_abs_path, "torrent")
 
         resume = read_bencoded(source_res_abs_path, "resume")
@@ -596,58 +597,66 @@ class TransmissionQbtImporter:
             try:
                 predicate_rv = eval(self._filter)
             except Exception as e:
-                logging.info(
-                    f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
+                logging.warning(
+                    f"Predicate threw {type(e).__name__} for torrent {info_hash}, skipping",
+                    exc_info=e,
                 )
-                return
+                return False
 
         if predicate_rv:
             self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
+            return True
         else:
             logging.debug(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
             )
+            return False
 
-    def import_one(self, torf: str) -> None:
+    def import_one(self, torf: str) -> bool:
         match = self._torrent_file_300_rgx.fullmatch(torf)
         if match:
             info_hash = match[1]
-            self.copy_if_wanted(
+            return self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
                 os.path.join(self._source_resume_dir, info_hash + ".resume"),
                 match[1],
             )
-            return
 
         match = self._torrent_file_294_rgx.search(torf)
         if match:
-            self.copy_if_wanted(
+            return self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
                 os.path.join(
                     self._source_resume_dir, os.path.splitext(torf)[0] + ".resume"
                 ),
                 None,
             )
-            return
 
         logging.warning(f"Unknown file {torf} found in torrents directory, skipping")
+        return False
 
     def scan(self) -> None:
+        success, failure, ignored = 0, 0, 0
         for _, _, files in os.walk(self.source_torrents_dir):
             for torf in files:
                 try:
-                    self.import_one(torf)
-
+                    if self.import_one(torf):
+                        success += 1
+                    else:
+                        ignored += 1
+                    continue
                 except ConversionError as e:
-                    logging.warning(
-                        f"Error while converting resume data for {torf} : {e}"
+                    logging.error(
+                        f"Error while converting resume data for {torf}", exc_info=e
                     )
                 except OSError as e:
-                    logging.warning(
-                        f"Failed to read {e.filename} ({e.strerror}), skipping"
-                    )
+                    logging.error(f"Failed to read file, skipping", exc_info=e)
                 except ReadBencodedError as e:
-                    logging.warning(f"Failed to decode {e}, skipping")
+                    logging.error(f"Failed to decode, skipping", exc_info=e)
+                failure += 1
+        logging.info(
+            f"Operation complete with {success} torrent(s) migrated {"(dry run)" if self._dry_run else ''}, {failure} torrent(s) failed and {ignored} torrent(s) ignored"
+        )
 
 
 def main() -> int:
@@ -673,7 +682,7 @@ def main() -> int:
         "--add-paused",
         "-p",
         action="store_true",
-        help="Optional flag to add all torrents paused rather than using the resume status",
+        help="Optional flag to add all torrents paused rather than using the Transmission status",
     )
     parser.add_argument(
         "--dry-run",
@@ -695,7 +704,7 @@ def main() -> int:
     try:
         TransmissionQbtImporter(args).scan()
     except QbtUsesSqliteForResumeError:
-        logging.error(
+        logging.critical(
             """It looks like your qBittorrent instance uses the experimental SQLite-based
 implementation for resume data storage. This is not supported. If you want to
 use this script, go to Tools > Preferences > Advanced and change "Resume data

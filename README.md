@@ -49,15 +49,33 @@ Fastresume before starting the migration from Transmission.
 
 ## Invocation
 
-Shut down both Transmission and qBittorrent and do :
+From the root of the folder
+
+1. (First time only) Create a virtual Python environment:
+```
+python -m venv venv
+```
+(you might have to do this first call with `python3` depending on your environment)
+
+1. (First time only) Install the prerequisites in the venv:
+```
+pip install -r requirements.txt
+```
+
+1. Shut down both Transmission and qBittorrent
+2. Run:
 
 ```
 ./transmission2qbt.py ~/.config/transmission ~/.local/share/data/qBittorrent/BT_backup
 ```
+For help including information about the supported parameters, run:
+```
+./transmission2qbt.py --help
+```
 
-## Predicate
+## Filter
 
-The `--predicate` argument accepts a Python expression that can be used for filtering torrents which are going to be imported to qBt. The parsed torrent file is named `torrent` and its associated Transmission resume data is `resume`. If the expression returns anything other than `True` or throws an exception, the torrent is skipped.
+The `--filter`/`f` argument accepts a Python expression that can be used for filtering torrents which are going to be imported to qBt. The parsed torrent file is named `torrent` and its associated Transmission resume data is `resume`. If the expression returns anything other than `True` or throws an exception, the torrent is skipped.
 Access to data is done with helper methods get(type, key) for dicts and get(type, index) and cast(type) for lists. For more information check the BencodeList and BencodeType class documentation in the script.
 
 For example, this will only cause torrents using Debian's tracker whose name

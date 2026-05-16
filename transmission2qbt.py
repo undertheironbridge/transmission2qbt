@@ -190,6 +190,7 @@ def transmission_get_file_priorities(
 
     files = torrent_info.get(BencodeList, b"files", optional=True)
     if files is None:
+        # Single-file torrent
         file_sizes = [torrent_info.get(int, b"length")]
     else:
         file_sizes = [file.get(int, b"length") for file in files.cast(BencodeDict)]

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+from dataclasses import dataclass
+from typing import Literal, cast, overload
+from collections.abc import Generator
 import sys
 import os
 import argparse
@@ -11,13 +14,14 @@ import hashlib
 
 
 import bencodepy
+from humanize import naturalsize
 
 
 class ConversionError(RuntimeError):
     pass
 
 
-def rm_f(path):
+def rm_f(path: str) -> None:
     try:
         os.remove(path)
     except (FileNotFoundError, OSError):
@@ -32,272 +36,630 @@ class QbtUsesSqliteForResumeError(RuntimeError):
     pass
 
 
-def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir):
+type BencodeType = bytes | int | list[BencodeType] | dict[bytes, BencodeType]
+"""A helper alias for the types that bencode data nodes can be represented as."""
+
+type BencodeWrap = bytes | int | BencodeList | BencodeDict
+"""A helper alias for the wrapper types associated with bencode types."""
+
+
+def encode(data: BencodeType) -> bytes:
+    """Wraps the bencode.py encode function to avoid code analysis errors."""
+    return bencodepy.encode(data)  # type: ignore
+
+
+def decode(data: bytes) -> BencodeType:
+    """Wraps the bencode.py decode function to avoid code analysis errors."""
+    return bencodepy.decode(data)  # type: ignore
+
+
+def wrap[T: BencodeWrap](t: type[T], node: BencodeType, path: str) -> T:
+    """Wraps a bencode type.
+    dicts & lists are typechecked and wrapped in BencodeList and BencodeDict respectively.
+    Scalar types (bytes & int) are typechecked and returned as is."""
+
+    if t is BencodeList:
+        if not isinstance(node, list):
+            raise ConversionError(f"f{path} is not of type list")
+        return cast(T, BencodeList(node, path))
+    if t is BencodeDict:
+        if not isinstance(node, dict):
+            raise ConversionError(f"f{path} is not of type dict")
+        return cast(T, BencodeDict(node, path))
+    if not isinstance(node, t):
+        raise ConversionError(f"{path} is not of type {T}")
+    return node
+
+
+class BencodeList:
+    """Wraps a bencode list. Allows retrieving items by index or enumerating them while typechecking them."""
+
+    def __init__(self, node: list[BencodeType], path: str) -> None:
+        self._node = node
+        self._path = path
+
+    def __len__(self):
+        return len(self._node)
+
+    def get[T: BencodeWrap](self, t: type[T], index: int) -> T:
+        """Retrieve by index and typecheck."""
+
+        return wrap(t, self._node[index], f"{self._path}[{index}]")
+
+    def cast[T: BencodeWrap](self, t: type[T]) -> Generator[T]:
+        """Enumerate all items while typechecking them."""
+
+        for index, child_node in enumerate(self._node):
+            yield wrap(t, child_node, f"{self._path}[{index}]")
+
+
+class BencodeDict:
+    """Wraps a bencode dict. Allows retrieving items by key while typechecking them."""
+
+    def __init__(self, node: dict[bytes, BencodeType], path: str) -> None:
+        self._node = node
+        self._path = path
+
+    @overload
+    def get[T: BencodeWrap](self, t: type[T], key: bytes) -> T:
+        """Retrieves an item by key and typechecks it. If the key is not present, raises ConversionError."""
+        ...
+
+    @overload
+    def get[T: BencodeWrap](self, t: type[T], key: bytes, *, default: BencodeType) -> T:
+        """Retrieves an item by key and typechecks it. If the key is not present, returns the provided default."""
+        ...
+
+    @overload
+    def get[T: BencodeWrap](
+        self, t: type[T], key: bytes, *, optional: Literal[True]
+    ) -> None | T:
+        """Retrieves an item by key and typechecks it. If the key is not present, returns None."""
+        ...
+
+    def get[T: BencodeWrap](
+        self,
+        t: type[T],
+        key: bytes,
+        *,
+        default: BencodeType | None = None,
+        optional: bool = False,
+    ) -> None | T:
+        child_node = self._node.get(key, default)
+        child_path = f"{self._path}.{key.decode()}"
+        if child_node is None:
+            if optional:
+                return None
+            raise ConversionError(f"{child_path} is missing")
+        return wrap(t, child_node, child_path)
+
+    def encode(self) -> bytes:
+        """Unwraps the data and returns it as a bencoded string."""
+        return encode(self._node)
+
+    @staticmethod
+    def decode(encoded: bytes, name: str) -> "BencodeDict":
+        """Decodes a bencoded string and wraps it in a new BencodeDict."""
+        decoded = decode(encoded)
+        return wrap(BencodeDict, decoded, name)
+
+
+def check_for_qbt_sqlite_resume_db(qbt_bt_backup_dir: str) -> None:
     torrents_db_path = os.path.join(qbt_bt_backup_dir, "..", "torrents.db")
     if os.path.exists(torrents_db_path):
         raise QbtUsesSqliteForResumeError()
 
 
-def read_bencoded(path):
+def read_bencoded(path: str, name: str) -> BencodeDict:
     with open(path, "rb") as f:
         try:
-            return bencodepy.bdecode(f.read())
+            data = f.read()
         except (ValueError, bencodepy.BencodeDecodeError) as e:
             raise ReadBencodedError(path) from e
+    return BencodeDict.decode(data, name)
 
 
 # FIXME BEP0003 says that clients must not perform a decode-encode
 # roundtrip on invalid data. this is exactly what this does.
-def calc_info_hash(parsed_tor):
-    return hashlib.sha1(bencodepy.bencode(parsed_tor[b"info"]))
+def calc_info_hash(torrent: BencodeDict) -> str:
+    return hashlib.sha1(torrent.get(BencodeDict, b"info").encode()).hexdigest()
 
 
-def transmission_get_speed_limit(resume_data, key):
-    speed_limit_obj = resume_data[key]
-    if speed_limit_obj[b"use-speed-limit"] != 0:
-        return speed_limit_obj[b"speed-Bps"]
+def transmission_get_speed_limit(resume: BencodeDict, key: bytes) -> int:
+    speed_limit_obj = resume.get(BencodeDict, key)
+    if speed_limit_obj.get(int, b"use-speed-limit") != 0:
+        return speed_limit_obj.get(int, b"speed-Bps")
 
     return -1
 
 
-def transmission_get_file_prorities(resume_data):
-    priority = resume_data.get(b"priority")
-    dnd = resume_data.get(b"dnd")
+def transmission_get_file_priorities(
+    torrent_info: BencodeDict, resume: BencodeDict
+) -> Generator[int]:
+    priorities = resume.get(BencodeList, b"priority", optional=True)
+    dnds = resume.get(BencodeList, b"dnd", optional=True)
 
-    # Return empty list if priority data is not available
-    if priority is None or dnd is None:
-        return []
+    # Return empty generator if priority data is not available
+    if priorities is None or dnds is None:
+        return
 
-    rv = []
-    if len(priority) != len(dnd):
+    if len(priorities) != len(dnds):
         raise ConversionError(
-            f"priority and dnd lengths are not equal : {len(priority)} != {len(dnd)}"
+            f"priority and dnd lengths are not equal : {len(priorities)} != {len(dnds)}"
         )
 
-    for idx, prio in list(enumerate(priority)):
-        if dnd[idx] == 1:
-            rv.append(0)  # libtorrent::dont_download
-        elif prio == -1:  # TR_PRI_LOW
-            rv.append(1)  # libtorrent::low_priority
-        elif prio == 0:  # TR_PRI_NORMAL
-            rv.append(4)  # libtorrent::default_priority
-        elif prio == 1:  # TR_PRI_HIGH
-            rv.append(7)  # libtorrent::top_priority
+    files = torrent_info.get(BencodeList, b"files", optional=True)
+    if files is None:
+        # Single-file torrent
+        file_sizes = [torrent_info.get(int, b"length")]
+    else:
+        file_sizes = [file.get(int, b"length") for file in files.cast(BencodeDict)]
 
-    return rv
+    index = 0
+    for file_size in file_sizes:
+        if file_size == 0:
+            # Transmission ignores 0-sized files entirely including when building the priority & dnd lists,
+            # but qBittorrent does not. This creates a mismatch in the index between the two resume files,
+            # meaning we have to explicitly return an extra item here, while NOT incrementing the index.
+            yield 4  # libtorrent::default_priority
+            continue
+        if dnds.get(int, index) == 1:
+            yield 0  # libtorrent::dont_download
+        else:
+            priority = priorities.get(int, index)
+            match priority:
+                case -1:  # TR_PRI_LOW
+                    yield 1  # libtorrent::low_priority
+                case 0:  # TR_PRI_NORMAL
+                    yield 4  # libtorrent::default_priority
+                case 1:  # TR_PRI_HIGH
+                    yield 7  # libtorrent::top_priority
+                case _:
+                    raise ConversionError(f"Unknown priority[{index}]: {priority}")
+        index += 1
 
 
-def peers_convert_from_raw_bytes(src, addr_size):
+def peers_convert_from_raw_bytes(
+    resume: BencodeDict, key: bytes, addr_size: int
+) -> bytes:
+    peers = resume.get(bytes, key, optional=True)
+    if peers is None:
+        return b""
+
     rv = bytearray()
     i = 0
-    while i < len(src):
+    while i < len(peers):
         i += 4  # type
-        rv += src[i : (i + addr_size)]  # addr
+        rv += peers[i : (i + addr_size)]  # addr
         i += max(addr_size, 16)
-        rv += src[i : (i + 2)]  # port
+        rv += peers[i : (i + 2)]  # port
         i += 2
         i += 2  # flags
     return bytes(rv)
 
 
-def peers_convert_from_bencoded(src):
-    # used since Transmission commit 1054ba4 (earliest release - 4.1.0)
-    rv = bytearray()
-    for d in src:
-        rv += d[b"socket_address"]
-    return bytes(rv)
-
-
-def transmission_get_peers(resume_data, addr_size, key):
-    src = resume_data.get(key)
-    if src is None:
+def peers_convert_from_bencoded(resume: BencodeDict, key: bytes) -> bytes:
+    peers = resume.get(BencodeList, key, optional=True)
+    if peers is None:
         return b""
-
-    if isinstance(src, list):
-        return peers_convert_from_bencoded(src)
-    else:
-        return peers_convert_from_raw_bytes(src, addr_size)
+    return b"".join(d.get(bytes, b"socket_address") for d in peers.cast(BencodeDict))
 
 
-def transmission_get_limit(tr_resume, limit_kind):
+def transmission_get_peers(resume: BencodeDict, key: bytes, addr_size: int) -> bytes:
+    try:
+        # Transmission 4.1.0+
+        return peers_convert_from_bencoded(resume, key)
+    except:
+        # Older Transmission
+        return peers_convert_from_raw_bytes(resume, key, addr_size)
+
+
+def transmission_get_limit(resume: BencodeDict, limit_kind: str) -> int:
     limit_key = f"{limit_kind}-limit".encode()
+    limit_obj = resume.get(BencodeDict, limit_key)
+
     mode_key = f"{limit_kind}-mode".encode()
+    limit_mode = limit_obj.get(int, mode_key)
 
-    limit_obj = tr_resume[limit_key]
-    limit_mode = limit_obj[mode_key]
-    if limit_mode == 0:  # TR_*LIMIT_GLOBAL
-        return "-2"  # BitTorrent::Torrent::USE_GLOBAL_*
-    if limit_mode == 1:  # TR_*LIMIT_SINGLE
-        return limit_obj[limit_key]
-    if limit_mode == 2:  # TR_*LIMIT_UNLIMITED
-        return "-1"  # BitTorrent::Torrent::NO_*_LIMIT
+    match limit_mode:
+        case 0:  # TR_*LIMIT_GLOBAL
+            return -2  # BitTorrent::Torrent::USE_GLOBAL_*
+        case 1:  # TR_*LIMIT_SINGLE
+            return limit_obj.get(int, limit_key)
+        case 2:  # TR_*LIMIT_UNLIMITED
+            return -1  # BitTorrent::Torrent::NO_*_LIMIT
+        case _:
+            raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
 
-    raise ConversionError(f"unknown value for {mode_key} : {limit_mode}")
+
+# On transmission_get_pieces & is_piece_complete
+#
+# The blocks data the in Transmission resume (tr_blocks) is a bitmask in the form of a bytes object (an immutable array of bytes, aka a
+# binary string).
+# Each byte represents 8 blocks: each bit in that byte represents a single block, i.e. a 16KiB chunk of torrent data.
+# Each bit is equal to 1 if the block is on disk, 0 if not.
+#
+# The pieces data in the qBittorrent/libtorrent resume (qb_pieces) is also a bytes object but not a bitmask: each byte represent a piece,
+# and is equal to 0x01 if the piece is on disk, 0x00 if not (only one of the 8 bits is used in each byte, the first 7 bits are always 0).
+#
+# Blocks are the atomic amount of data used for storage. Pieces are used in the hash calculation (in Bittorrent v1), the protocol, and in
+# the resume files, such as qb_pieces here.
+# There is an additional field (unfinished) in the qBittorrent resume to store block info for incomplete pieces, but this field is ignored
+# here, see README.md.
+#
+# The piece size is a multiple of the block size, but not always a multiple of 8*16KiB (the data chunk represented by a tr_blocks byte).
+# Which means that a tr_blocks byte might represent more than one qb_pieces byte, and vice versa; it also means that the first block of each
+# piece will not necessarily be aligned with the leftmost bit of a tr_blocks byte, or the last block with the rightmost bit of a byte.
+#
+# So to understand which pieces are fully on disk (which is what we need in order to build qb_pieces), we need to extract piece_blocks for
+# each piece in tr_blocks, and check if they are all 1.
+# We start by finding what tr_block byte the piece starts and ends with. It might start midway through a byte (i.e. not the leftmost bit of
+# the start byte) and likewise it might end midway through a byte (not the rightmost bit of the end byte). For this reason the first and last
+# byte are checked using a bitwise masking operation, with a precalculated dict of masks indexed with the order of the first and last bit.
+# For instance, if the start bit order is 3, then the mask is 00011111 (0x1f). We mask the byte coming from tr_blocks against this
+# i.e. tr_blocks[piece_start] & 0x1f == 0x1f. The masks for the end bit order are reversed i.e. if the bit order is 3, the mask is
+# 11110000 (0xf0) so we will check if tr_blocks[piece_end] & 0xf0 == 0xf0.
+# All the tr_blocks bytes between the first and the last are fully part of the piece, so if the piece is complete the block bytes are all
+# 0xff. No need to mask for these, we can just compare them all to 0xff.
+#
+# There is a special case when a piece is fully contained within a block byte (which only happens when the piece size is <= 8*16KiB).
+# In this case there is only one block byte to check and we need to mask it against both the start and end mask.
+#
+# We also need to take in account that the total number of blocks might not align with the end of a piece, i.e. the last piece can be smaller.
+#
+# In another special case, tr_blocks might contain fewer bytes than expected, because Transmission does not write the end of tr_blocks when the
+# end of the torrent is not on disk (it will only write up to the last block that is on disk). For that reason when retrieving a piece we might
+# get fewer bytes than expected. In that case we need to return False since it means that the piece is not on disk.
+#
+# Finally, Transmission sets the whole tr_blocks to b"all" for complete torrents and b"none" for empty torrents, so these special cases must
+# be dealt with separately.
+
+BLOCK_SIZE = 1 << 14  # 16KiB, standard across torrents
+FIRST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF >> i for i in range(8)}
+LAST_BYTE_MASK_BY_BIT_ORDER = {i: 0xFF << 7 - i & 0xFF for i in range(8)}
 
 
-def map_resume_to_qbt(resume_data, info_hash):
-    qbt_resume_data = {
-        b"file-format": "libtorrent resume file",
+def is_piece_complete(
+    tr_blocks: bytes, piece_index: int, blocks_per_piece: int, num_blocks: int
+):
+    # Indexes of the first block of the piece
+    # In total blocks
+    piece_start_in_overall_blocks = piece_index * blocks_per_piece
+    # In tr_blocks
+    piece_start_in_block_bytes = piece_start_in_overall_blocks // 8
+    # In the specific tr_blocks byte
+    piece_start_bit_order = piece_start_in_overall_blocks % 8
+
+    # Indexes of the last block of the piece
+    # In total blocks
+    piece_end_in_overall_blocks = (
+        min(piece_start_in_overall_blocks + blocks_per_piece, num_blocks) - 1
+    )
+    # In tr_blocks
+    piece_end_in_block_bytes = piece_end_in_overall_blocks // 8
+    # In the specific tr_blocks byte
+    piece_end_bit_order = piece_end_in_overall_blocks % 8
+
+    num_piece_bytes = piece_end_in_block_bytes - piece_start_in_block_bytes + 1
+    piece_bytes = tr_blocks[
+        piece_start_in_block_bytes : piece_start_in_block_bytes + num_piece_bytes
+    ]
+    if len(piece_bytes) < num_piece_bytes:
+        # tr_blocks is shorter than expected, meaning the piece is not complete
+        return False
+    first_byte_mask = FIRST_BYTE_MASK_BY_BIT_ORDER[piece_start_bit_order]
+    last_byte_mask = LAST_BYTE_MASK_BY_BIT_ORDER[piece_end_bit_order]
+    if num_piece_bytes == 1:
+        # If there is only one byte we mask as first and last byte
+        byte_mask = first_byte_mask & last_byte_mask
+        return piece_bytes[0] & byte_mask == byte_mask
+    if piece_bytes[0] & first_byte_mask != first_byte_mask:
+        # If the piece fails the mask for the first byte
+        return False
+    if piece_bytes[-1] & last_byte_mask != last_byte_mask:
+        # If the piece fails the mask for the last byte
+        return False
+    # Test all bytes except the first and the last (should all be 0xff)
+    return piece_bytes[1:-1] == b"\xff" * (num_piece_bytes - 2)
+
+
+def transmission_get_pieces(torrent: BencodeDict, resume: BencodeDict) -> bytes:
+    torrent_info = torrent.get(BencodeDict, b"info")
+    torrent_size = torrent_info.get(int, b"length", optional=True) or sum(
+        file.get(int, b"length")
+        for file in torrent_info.get(BencodeList, b"files").cast(BencodeDict)
+    )
+    piece_size = torrent_info.get(int, b"piece length")
+
+    # Sanity check the piece size
+    if piece_size % BLOCK_SIZE > 0:
+        raise ConversionError(
+            f"Piece size {piece_size} is not a multiple of {naturalsize(BLOCK_SIZE, binary=True)}, aborting"
+        )
+
+    blocks_per_piece = piece_size // BLOCK_SIZE
+    # ceiling integer division
+    num_pieces = -(-torrent_size // piece_size)
+    num_blocks = -(-torrent_size // BLOCK_SIZE)
+
+    tr_blocks = resume.get(BencodeDict, b"progress").get(bytes, b"blocks")
+
+    # Shorthand for complete torrents
+    if tr_blocks == b"all":
+        return b"\x01" * num_pieces
+    # Shorthand for empty torrents
+    if tr_blocks == b"none":
+        return b"\x00" * num_pieces
+
+    # Sanity check the block bytes length
+    # ceiling integer division
+    expected_block_bytes = -(-num_blocks // 8)
+    if len(tr_blocks) > expected_block_bytes:
+        raise ConversionError(
+            f"The resume block length was expected to be {expected_block_bytes} but was {len(tr_blocks)}"
+        )
+
+    # Initialise the return object with 0s
+    qb_pieces = bytearray(num_pieces)
+
+    # Go through progress.blocks, grouping them into pieces
+    for piece_index in range(num_pieces):
+        if is_piece_complete(tr_blocks, piece_index, blocks_per_piece, num_blocks):
+            qb_pieces[piece_index] = 0x01
+
+    return bytes(qb_pieces)
+
+
+def transmission_get_files(
+    torrent_info: BencodeDict, resume: BencodeDict
+) -> None | list[BencodeType]:
+    # When adding a torrent to Transmission, the resume name is initially set to the same as
+    # the name defined in the torrent. It diverges when renaming the torrent inside Transmission.
+    # This action also renames the file (for single-file torrents) or top-level directory
+    # (multi-file torrents).
+    tr_name = resume.get(bytes, b"name")
+
+    # Files as defined in the torrent.
+    tor_files = torrent_info.get(BencodeList, b"files", optional=True)
+    if tor_files is None:
+        # Single-file torrent, return the resume name.
+        return [tr_name]
+
+    # Files as defined in the Transmission resume.
+    tr_files = resume.get(BencodeList, b"files", optional=True)
+    if tr_files is None:
+        # If we do not have access to this data, None is a valid value for qBittorrent as it will
+        # use the default names (the ones defined in the torrent).
+        return None
+
+    # Files as defined in the qBittorrent resume (what we are calculating).
+    qbit_files = list[BencodeType]()
+
+    tr_index = 0
+    for tor_file in tor_files.cast(BencodeDict):
+        file_size = tor_file.get(int, b"length")
+        if file_size == 0:
+            # Transmission ignores 0-sized files entirely including when building the file list, but
+            # qBittorrent does not. This creates a mismatch in the index between the two resume files,
+            # meaning we have to explicitly return an extra item here, while NOT incrementing the index.
+            qbit_files.append(
+                tr_name
+                + b"/"
+                + b"/".join(tor_file.get(BencodeList, b"path").cast(bytes))
+            )
+        else:
+            qbit_files.append(tr_files.get(bytes, tr_index))
+            tr_index += 1
+
+    return qbit_files
+
+
+def map_resume_to_qbt(
+    info_hash: str, torrent: BencodeDict, resume: BencodeDict, add_paused: bool
+) -> dict[bytes, BencodeType]:
+    torrent_info = torrent.get(BencodeDict, b"info")
+    downloading_time_seconds = resume.get(int, b"downloading-time-seconds")
+    seeding_time_seconds = resume.get(int, b"seeding-time-seconds")
+    name = resume.get(bytes, b"name")
+    paused = add_paused or resume.get(int, b"paused")
+
+    qbt_resume_data: BencodeType = {
+        b"file-format": b"libtorrent resume file",
         b"file-version": 1,
         b"info-hash": binascii.unhexlify(info_hash),
-        b"name": resume_data[b"name"],
-        b"total_uploaded": resume_data[b"uploaded"],
-        b"total_downloaded": resume_data[b"downloaded"],
-        b"added_time": resume_data[b"added-date"],
-        b"completed_time": resume_data[b"done-date"],
-        b"active_time": resume_data[b"downloading-time-seconds"]
-        + resume_data[b"seeding-time-seconds"],
-        b"finished_time": resume_data[b"downloading-time-seconds"],
-        b"seeding_time": resume_data[b"seeding-time-seconds"],
-        b"max_connections": resume_data[b"max-peers"],
-        b"upload_rate_limit": transmission_get_speed_limit(
-            resume_data, b"speed-limit-up"
-        ),
+        b"name": name,
+        b"total_uploaded": resume.get(int, b"uploaded"),
+        b"total_downloaded": resume.get(int, b"downloaded"),
+        b"added_time": resume.get(int, b"added-date"),
+        b"completed_time": resume.get(int, b"done-date"),
+        b"active_time": downloading_time_seconds + seeding_time_seconds,
+        b"finished_time": downloading_time_seconds,
+        b"seeding_time": seeding_time_seconds,
+        b"max_connections": resume.get(int, b"max-peers"),
+        b"upload_rate_limit": transmission_get_speed_limit(resume, b"speed-limit-up"),
         b"download_rate_limit": transmission_get_speed_limit(
-            resume_data, b"speed-limit-down"
+            resume, b"speed-limit-down"
         ),
-        b"save_path": resume_data[b"destination"],
-        b"paused": resume_data[b"paused"],
-        b"sequential_download": resume_data.get(b"sequentialDownload", 0),
-        b"file_priority": transmission_get_file_prorities(resume_data),
-        b"peers": transmission_get_peers(resume_data, 4, b"peers2"),
-        b"peers6": transmission_get_peers(resume_data, 16, b"peers2-6"),
-        b"qBt-name": resume_data[b"name"],
-        b"qBt-ratioLimit": transmission_get_limit(resume_data, "ratio"),
-        b"qBt-inactiveSeedingTimeLimit": int(
-            transmission_get_limit(resume_data, "idle")
-        ),
-        b"qBt-savePath": resume_data[b"destination"],
+        b"save_path": resume.get(bytes, b"destination"),
+        b"paused": paused,
+        b"sequential_download": resume.get(int, b"sequentialDownload", default=0),
+        b"file_priority": list(transmission_get_file_priorities(torrent_info, resume)),
+        b"qBt-name": name,
+        b"qBt-ratioLimit": transmission_get_limit(resume, "ratio"),
+        b"qBt-inactiveSeedingTimeLimit": int(transmission_get_limit(resume, "idle")),
+        b"qBt-savePath": resume.get(bytes, b"destination"),
+        b"pieces": transmission_get_pieces(torrent, resume),
     }
 
-    if b"group" in resume_data:
-        qbt_resume_data[b"qBt-category"] = resume_data[b"group"]
+    if not torrent_info.get(int, b"private", default=0):
+        qbt_resume_data[b"peers"] = transmission_get_peers(resume, b"peers2", 4)
+        qbt_resume_data[b"peers6"] = transmission_get_peers(resume, b"peers2-6", 16)
 
-    if b"labels" in resume_data:
-        qbt_resume_data[b"qBt-tags"] = (resume_data[b"labels"],)
+    group = resume.get(bytes, b"group", optional=True)
+    if group is not None:
+        qbt_resume_data[b"qBt-category"] = group
 
-    if b"files" in resume_data:
-        qbt_resume_data[b"mapped_files"] = resume_data[b"files"]
+    labels = resume.get(BencodeList, b"labels", optional=True)
+    if labels is not None:
+        qbt_resume_data[b"qBt-tags"] = list(labels.cast(bytes))
 
-    if b"incomplete-dir" in resume_data:
-        qbt_resume_data[b"qBt-downloadPath"] = resume_data[b"incomplete-dir"]
+    files = transmission_get_files(torrent_info, resume)
+    if files is not None:
+        qbt_resume_data[b"mapped_files"] = files
 
-    if resume_data[b"paused"] == 1:
+    incomplete_dir = resume.get(bytes, b"incomplete_dir", optional=True)
+    if incomplete_dir is not None:
+        qbt_resume_data[b"qBt-downloadPath"] = incomplete_dir
+
+    if paused == 1:
         qbt_resume_data[b"auto_managed"] = 0
 
     return qbt_resume_data
 
 
+@dataclass(frozen=True)
+class Args:
+    qbt_bt_backup_dir: str
+    transmission_config_dir: str
+    filter: str | None
+    add_paused: bool
+    dry_run: bool
+    log_level: int
+
+
 class TransmissionQbtImporter:
-    def __init__(self, args):
+    def __init__(self, args: Args) -> None:
         check_for_qbt_sqlite_resume_db(args.qbt_bt_backup_dir)
         self.source_torrents_dir = os.path.join(
             args.transmission_config_dir, "torrents"
         )
-        self.source_resume_dir = os.path.join(args.transmission_config_dir, "resume")
-        self.target_dir = args.qbt_bt_backup_dir
-        self.predicate = args.predicate
-        self.torrent_file_300_rgx = re.compile("([0-9a-f]{40})\\.torrent")
-        self.torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
+        self._source_resume_dir = os.path.join(args.transmission_config_dir, "resume")
+        self._target_dir = args.qbt_bt_backup_dir
+        self._filter = args.filter
+        self._add_paused = args.add_paused
+        self._dry_run = args.dry_run
+        self._torrent_file_300_rgx = re.compile("([0-9a-f]{40})\\.torrent")
+        self._torrent_file_294_rgx = re.compile("\\.[0-9a-f]{16}\\.torrent$")
 
-    def copy_to_target(self, source_tor_abs_path, info_hash, resume_data):
-        qbt_resume_data = map_resume_to_qbt(resume_data, info_hash)
-        qbt_resume_path = os.path.join(self.target_dir, info_hash + ".fastresume")
-        qbt_torrent_path = os.path.join(self.target_dir, info_hash + ".torrent")
-        try:
-            with open(qbt_resume_path, "wb") as resumf:
-                resumf.write(bencodepy.bencode(qbt_resume_data))
-            shutil.copy(source_tor_abs_path, qbt_torrent_path)
-            logging.info(
-                f"Successfully imported {os.path.basename(source_tor_abs_path)} ({info_hash})"
-            )
-
-        except:
-            logging.warning(
-                f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {qbt_bt_backup_dir}"
-            )
-            rm_f(qbt_resume_path)
-            rm_f(qbt_torrent_path)
-
-    def copy_if_wanted(self, source_tor_abs_path, parsed_tor, info_hash, resume_data):
-        if self.predicate is None:
-            self.copy_to_target(source_tor_abs_path, info_hash, resume_data)
-            return
-
-        predicate_rv = None
-        parsed_tor = (
-            read_bencoded(source_tor_abs_path) if parsed_tor is None else parsed_tor
+    def copy_to_target(
+        self,
+        source_tor_abs_path: str,
+        info_hash: str,
+        torrent: BencodeDict,
+        resume: BencodeDict,
+    ) -> None:
+        qbt_resume_data = map_resume_to_qbt(
+            info_hash, torrent, resume, self._add_paused
         )
-        try:
-            predicate_rv = eval(self.predicate)
-        except Exception as e:
-            logging.info(
-                f"Predicate threw {type(e).__name__} with {e} for torrent {info_hash}, skipping"
+        qbt_resume_enc = encode(qbt_resume_data)
+        qbt_resume_path = os.path.join(self._target_dir, info_hash + ".fastresume")
+        qbt_torrent_path = os.path.join(self._target_dir, info_hash + ".torrent")
+        if self._dry_run:
+            logging.debug(
+                f"dry run: would save {naturalsize(len(qbt_resume_enc), binary=True)} to {qbt_resume_path}"
             )
-            return
-
-        if predicate_rv is True:
-            self.copy_to_target(source_tor_abs_path, info_hash, resume_data)
+            logging.debug(
+                f"dry run: would copy {source_tor_abs_path} to {qbt_torrent_path}"
+            )
         else:
-            logging.info(
+            try:
+                with open(qbt_resume_path, "wb") as resumf:
+                    resumf.write(qbt_resume_enc)
+                shutil.copy(source_tor_abs_path, qbt_torrent_path)
+                logging.debug(
+                    f"Successfully imported {os.path.basename(source_tor_abs_path)} ({info_hash})"
+                )
+
+            except Exception as e:
+                rm_f(qbt_resume_path)
+                rm_f(qbt_torrent_path)
+                raise ConversionError(
+                    f"Could not copy files for {os.path.basename(source_tor_abs_path)} ({info_hash}) into {self._target_dir}",
+                    e,
+                )
+
+    def copy_if_wanted(
+        self,
+        source_tor_abs_path: str,
+        source_res_abs_path: str,
+        info_hash: str | None,
+    ) -> bool:
+        torrent = read_bencoded(source_tor_abs_path, "torrent")
+
+        resume = read_bencoded(source_res_abs_path, "resume")
+
+        if info_hash is None:
+            info_hash = calc_info_hash(torrent)
+
+        if self._filter is None:
+            predicate_rv = True
+        else:
+            try:
+                predicate_rv = eval(self._filter)
+            except Exception as e:
+                logging.warning(
+                    f"Predicate threw {type(e).__name__} for torrent {info_hash}, skipping",
+                    exc_info=e,
+                )
+                return False
+
+        if predicate_rv:
+            self.copy_to_target(source_tor_abs_path, info_hash, torrent, resume)
+            return True
+        else:
+            logging.debug(
                 f"Predicate returned {predicate_rv} for torrent {info_hash}, skipping"
             )
+            return False
 
-    def import_one(self, torf):
-        match = self.torrent_file_300_rgx.fullmatch(torf)
+    def import_one(self, torf: str) -> bool:
+        match = self._torrent_file_300_rgx.fullmatch(torf)
         if match:
             info_hash = match[1]
-            resume_data = read_bencoded(
-                os.path.join(self.source_resume_dir, info_hash + ".resume")
-            )
-            self.copy_if_wanted(
+            return self.copy_if_wanted(
                 os.path.join(self.source_torrents_dir, torf),
-                None,
-                info_hash,
-                resume_data,
+                os.path.join(self._source_resume_dir, info_hash + ".resume"),
+                match[1],
             )
-            return
 
-        match = self.torrent_file_294_rgx.search(torf)
+        match = self._torrent_file_294_rgx.search(torf)
         if match:
-            resume_data = read_bencoded(
+            return self.copy_if_wanted(
+                os.path.join(self.source_torrents_dir, torf),
                 os.path.join(
-                    self.source_resume_dir, os.path.splitext(torf)[0] + ".resume"
-                )
+                    self._source_resume_dir, os.path.splitext(torf)[0] + ".resume"
+                ),
+                None,
             )
-            source_tor_abs_path = os.path.join(self.source_torrents_dir, torf)
-            parsed_tor = read_bencoded(source_tor_abs_path)
-            info_hash = calc_info_hash(parsed_tor).hexdigest()
-            self.copy_if_wanted(
-                source_tor_abs_path,
-                parsed_tor,
-                info_hash,
-                resume_data,
-            )
-            return
 
         logging.warning(f"Unknown file {torf} found in torrents directory, skipping")
+        return False
 
-    def scan(self):
+    def scan(self) -> None:
+        success, failure, ignored = 0, 0, 0
         for _, _, files in os.walk(self.source_torrents_dir):
             for torf in files:
                 try:
-                    self.import_one(torf)
-
+                    if self.import_one(torf):
+                        success += 1
+                    else:
+                        ignored += 1
+                    continue
                 except ConversionError as e:
-                    logging.warning(
-                        f"Error while converting resume data for {torf} : {str(e)}"
+                    logging.error(
+                        f"Error while converting resume data for {torf}", exc_info=e
                     )
                 except OSError as e:
-                    logging.warning(
-                        f"Failed to read {e.filename} ({e.strerror}), skipping"
-                    )
+                    logging.error(f"Failed to read file, skipping", exc_info=e)
                 except ReadBencodedError as e:
-                    logging.warning(f"Failed to decode {str(e)}, skipping")
+                    logging.error(f"Failed to decode, skipping", exc_info=e)
+                failure += 1
+        logging.info(
+            f"Operation complete with {success} torrent(s) migrated {"(dry run)" if self._dry_run else ''}, {failure} torrent(s) failed and {ignored} torrent(s) ignored"
+        )
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
+def main() -> int:
     parser = argparse.ArgumentParser(
         prog="transmission2qbt",
         description="Imports all your torrents from Transmission to qBittorrent while trying to preserve as much metadata as possible",
@@ -305,25 +667,44 @@ def main():
     )
     parser.add_argument(
         "transmission_config_dir",
-        action="store",
         help="The root configuration directory of the Transmission instance whose torrents to import",
     )
     parser.add_argument(
         "qbt_bt_backup_dir",
-        action="store",
         help="The BT_backup directory inside target qBittorrent instance's data directory",
     )
     parser.add_argument(
-        "--predicate",
-        action="store",
+        "--filter",
+        "-f",
         help="A Python expression for filtering source torrents",
     )
+    parser.add_argument(
+        "--add-paused",
+        "-p",
+        action="store_true",
+        help="Optional flag to add all torrents paused rather than using the Transmission status",
+    )
+    parser.add_argument(
+        "--dry-run",
+        "-d",
+        action="store_true",
+        help="Optional flag to not write any data to disk",
+    )
+    parser.add_argument(
+        "--log-level",
+        "-l",
+        type=int,
+        default=logging.INFO,
+        help="Optional flag to set log level, see https://docs.python.org/3/library/logging.html#logging-levels",
+    )
 
-    args = parser.parse_args()
+    args = cast(Args, parser.parse_args())
+    logging.basicConfig(level=args.log_level, format="%(levelname)s: %(message)s")
+
     try:
         TransmissionQbtImporter(args).scan()
     except QbtUsesSqliteForResumeError:
-        logging.error(
+        logging.critical(
             """It looks like your qBittorrent instance uses the experimental SQLite-based
 implementation for resume data storage. This is not supported. If you want to
 use this script, go to Tools > Preferences > Advanced and change "Resume data

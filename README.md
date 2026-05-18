@@ -10,7 +10,7 @@ Python is not my native language, so please bear with me.
 Most of the tools I could find simply used qBt's Web API to import torrents.
 This is fine for most usages but I wanted to keep some of the metadata that's
 saved in resume files, notably the original "added date" as well as the amount
-of data transferred so far.
+of data transferred so far and the completion state of the torrent.
 
 # Tested combinations
 
@@ -47,28 +47,44 @@ for the *Resume data storage type (requires restart)* setting should be
 script so qBittorrent can export any existing data from SQLite and switches to
 Fastresume before starting the migration from Transmission.
 
+Python 3.12 or over must be installed in the environment where the script is run.
+
 ## Invocation
 
-Shut down both Transmission and qBittorrent and do :
+From the root of the folder
+
+1. (First time only) Create a virtual Python environment:
+```
+python -m venv venv
+```
+(you might have to do this first call with `python3` depending on your environment)
+
+1. (First time only) Install the prerequisites in the venv:
+```
+pip install -r requirements.txt
+```
+
+1. Shut down both Transmission and qBittorrent
+2. Run:
 
 ```
 ./transmission2qbt.py ~/.config/transmission ~/.local/share/data/qBittorrent/BT_backup
 ```
+For help including information about the supported parameters, run:
+```
+./transmission2qbt.py --help
+```
 
-## Predicate
+## Filter
 
-The `--predicate` argument accepts a Python expression that can be used for
-filtering torrents which are going to be imported to qBt. The parsed torrent
-file is named `parsed_tor` and its associated Transmission resume data is
-`resume_data`. If the expression returns anything other than `True` or throws
-an exception, the torrent is skipped.
+The `--filter`/`f` argument accepts a Python expression that can be used for filtering torrents which are going to be imported to qBt. The parsed torrent file is named `torrent` and its associated Transmission resume data is `resume`. If the expression returns anything other than `True` or throws an exception, the torrent is skipped.
+Access to data is done with helper methods get(type, key) for dicts and get(type, index) and cast(type) for lists. For more information check the BencodeList and BencodeType class documentation in the script.
 
 For example, this will only cause torrents using Debian's tracker whose name
 includes `amd64` to be imported :
 
 ```
-parsed_tor[b'announce'] == b'http://bttracker.debian.org:6969/announce'
-and b'amd64' in parsed_tor[b'info'][b'name']
+torrent.get(bytes, b'announce') == b'http://bttracker.debian.org:6969/announce' and b'amd64' in torrent.get(BencodeType, b'info').get(bytes, b'name')
 ```
 
 # Mappings
@@ -110,11 +126,23 @@ then the location you want is `${profile_dir}/qBittorrent/data/BT_backup`.
 
 # Limitations
 
-* I couldn't figure out how to import Transmission data about the already
-available pieces, which means that all torrents will automatically be re-checked
-when qBittorrent is first run after the migration.
+## Download progress
 
-* If your Transmission is set to append `.part` to incomplete files, make sure
+qBittorrent and Transmission have a different approach to storing information about what data is already on disk:
+* Transmission keeps track of the status of each 16KiB block (in `resume[b"progress"][b"blocks]`, which is a bitmask where each bit represents a block). The state of each piece is not explicity stored in the resume file (but is implicitly there since each piece is made of consecutive blocks).
+* qBittorrent keeps track separately of:
+  * Which pieces are complete (in `resume[b"pieces"]`).
+  * Which blocks are complete in each incomplete piece (in `resume[b"unfinished"]`).
+
+With this in mind, **this script only concerns itself with complete pieces**, i.e. the `pieces` section of the qBittorrent resume file is calculated but the `unfinished` section is omitted.
+It should be possible to build it, but:
+- This would almost certainly significantly slow down the script. The pieces calculation only leverages data in the resume files, but calculating the unfinished field requires computing checksums of the actual torrent data (see the adler32 checksum in [the spec](https://github.com/steeve/libtorrent/blob/master/docs/manual.rst#fast-resume)).
+- The only effect of not calculating the field is to **discard partially downloaded pieces**. This should generally be a negligible amount of data for qBittorrent to download again.
+- As a workaround, force-rechecking all incomplete torrents once the migration is complete should recover the information (not tested).
+
+## Incomplete files
+
+If your Transmission is set to append `.part` to incomplete files, make sure
 you remove that suffix before running the migration, otherwise qBittorrent won't
 detect those files at all. Once qBt detects that a file is incomplete, it will
 append `.!qBt` itself if that option is enabled. This command will remove the

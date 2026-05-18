@@ -135,9 +135,9 @@ qBittorrent and Transmission have a different approach to storing information ab
   * Which blocks are complete in each incomplete piece (in `resume[b"unfinished"]`).
 With this in mind, **this script only concerns itself with complete pieces**, i.e. the `pieces` section of the qBittorrent resume file is calculated but the `unfinished` section is omitted.
 It should be possible to build it, but:
-- This would almost certainly significantly slow down the script. The pieces calculation only leverages data in the resume files, but calculating the unfinished field requires computing checksums of the actual torrent data (see the adler32 checksum in [the spec](https://github.com/steeve/libtorrent/blob/master/docs/manual.rst#fast-resume)).
-- The only effect of not calculating the field is to **discard partially downloaded pieces**. This should generally be a negligible amount of data for qBittorrent to download again.
-- As a workaround, force-rechecking all incomplete torrents once the migration is complete should recover the information (not tested).
+    - This would almost certainly significantly slow down the script. The pieces calculation only leverages data in the resume files, but calculating the unfinished field requires computing checksums of the actual torrent data (see the adler32 checksum in [the spec](https://github.com/steeve/libtorrent/blob/master/docs/manual.rst#fast-resume)).
+    - The only effect of not calculating the field is to **discard partially downloaded pieces**. This should generally be a negligible amount of data for qBittorrent to download again.
+    - As a workaround, force-rechecking all incomplete torrents once the migration is complete should recover the information (not tested).
 
 ## Incomplete files
 
